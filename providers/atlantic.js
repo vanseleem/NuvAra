@@ -36,6 +36,7 @@ var __async = (__this, __arguments, generator) => {
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 const HELIOS_API = "https://stream.hls.lol";
 const AES_GCM_KEY_HEX = "117c358bcfcaf8fe2cfca57c9d2238a300e1c4de2efb83a5012ba84d8a31f1dd";
+const PROXY_BASE = "https://test.vanseleem.workers.dev";
 
 /**
  * Hex string to Uint8Array (for browser/Node.js)
@@ -106,7 +107,7 @@ function decryptHeliosUrl(encryptedUrl) {
 }
 
 /**
- * Fetch from Helios API
+ * Fetch from Helios API — routed through Cloudflare Worker proxy
  */
 function fetchHelios(tmdbId, mediaType, season, episode) {
   return __async(this, null, function* () {
@@ -121,9 +122,11 @@ function fetchHelios(tmdbId, mediaType, season, episode) {
         params.set("episodeId", String(episode || 1));
       }
 
-      const url = `${HELIOS_API}/helios?${params.toString()}`;
-      
-      console.log("[Atlantic] Fetching:", url);
+      const heliosUrl = `${HELIOS_API}/helios?${params.toString()}`;
+      // Route through the Cloudflare Worker to bypass blocks
+      const url = `${PROXY_BASE}/?url=${encodeURIComponent(heliosUrl)}`;
+
+      console.log("[Atlantic] Fetching via worker:", url);
 
       const response = yield fetch(url, {
         headers: {
@@ -193,7 +196,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     }
 
     try {
-      // Fetch from Helios
+      // Fetch from Helios (through worker)
       const sources = yield fetchHelios(tmdbId, mediaType, season, episode);
 
       if (!Object.keys(sources).length) {
