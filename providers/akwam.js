@@ -2,17 +2,41 @@ var BASE = "https://akwam.ss";
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
+var _CACHE = { search: {}, ttl: 5 * 60 * 1000 };
+function _cacheGet(k) {
+  var e = _CACHE.search[k];
+  if (!e) return null;
+  if (Date.now() - e.t > _CACHE.ttl) { delete _CACHE.search[k]; return null; }
+  return e.v;
+}
+function _cacheSet(k, v) {
+  _CACHE.search[k] = { t: Date.now(), v: v };
+  return v;
+}
+
+var _AR_SEASONS = {
+  'الاول': 1, 'الاولي': 1, 'الأول': 1, 'الأولى': 1,
+  'الثاني': 2, 'الثانية': 2, 'الثالث': 3, 'الثالثة': 3,
+  'الرابع': 4, 'الرابعة': 4, 'الخامس': 5, 'الخامسة': 5,
+  'السادس': 6, 'السادسة': 6, 'السابع': 7, 'السابعة': 7,
+  'الثامن': 8, 'الثامنة': 8, 'التاسع': 9, 'التاسعة': 9,
+  'العاشر': 10, 'العاشرة': 10
+};
+function _parseSeason(t) {
+  var m = String(t || '').match(/الموسم\s+(\S+)/);
+  if (!m) return null;
+  if (_AR_SEASONS[m[1]] != null) return _AR_SEASONS[m[1]];
+  var n = Number(m[1]);
+  return isNaN(n) ? null : n;
+}
+
 function fetchText(url, referer) {
-  url = String(url).replace(/[^\x00-\x7F]/g, function(c) {
-    return encodeURIComponent(c);
-  });
+  url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
   var headers = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
   };
-  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) {
-    return encodeURIComponent(c);
-  });
+  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
   return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.text();
@@ -30,18 +54,11 @@ function decodeHtml(str) {
 }
 
 function stripHtml(str) {
-  return decodeHtml(String(str || ""))
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function normalizeTitle(str) {
-  return String(str || "")
-    .toLowerCase()
-    .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(str || "").toLowerCase().replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function similarity(a, b) {
@@ -50,11 +67,13 @@ function similarity(a, b) {
   if (!a || !b) return 0;
   if (a === b) return 1;
   if (a.includes(b) || b.includes(a)) return 0.85;
-  var aa = new Set(a.split(" "));
-  var bb = new Set(b.split(" "));
+  var aa = a.split(" ");
+  var bb = b.split(" ");
+  var setB = {};
+  bb.forEach(function(x) { setB[x] = 1; });
   var common = 0;
-  aa.forEach(function(x) { if (bb.has(x)) common++; });
-  return common / Math.max(aa.size, bb.size);
+  aa.forEach(function(x) { if (setB[x]) common++; });
+  return common / Math.max(aa.length, bb.length);
 }
 
 function getSearchTitle(tmdbId, mediaType) {
@@ -86,13 +105,13 @@ function getSearchTitle(tmdbId, mediaType) {
 
 function extractSearchResults(html) {
   var results = [];
-  var seen = new Set();
+  var seen = {};
   var re = /<a\b[^>]*href=["']([^"']*\/(?:movie|series)\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
     var url = decodeHtml(m[1]);
     var block = m[2];
-    if (seen.has(url)) continue;
+    if (seen[url]) continue;
     var title = "";
     var titleMatch = block.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
       block.match(/class=["'][^"']*(?:entry-title|title|text-white)[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
@@ -105,8 +124,8 @@ function extractSearchResults(html) {
       }
     }
     if (!title || title === "-->" || title.length < 2) continue;
-    var absolute = url.startsWith("http") ? url : BASE + url;
-    seen.add(url);
+    var absolute = url.indexOf("http") === 0 ? url : BASE + url;
+    seen[url] = 1;
     results.push({ url: absolute, title: title });
   }
   return results;
@@ -115,10 +134,16 @@ function extractSearchResults(html) {
 function searchAkwam(title) {
   var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
   var url = BASE + "/search?q=" + encodeURIComponent(cleanTitle);
+  var cached = _cacheGet(url);
+  if (cached) {
+    console.log("[Akwam] Search cached:", title, "->", cached.length);
+    return Promise.resolve(cached);
+  }
   console.log("[Akwam] Search:", url);
   return fetchText(url, BASE).then(function(html) {
     var results = extractSearchResults(html);
     console.log("[Akwam] Search results for", title + ":", results.length);
+    _cacheSet(url, results);
     return results;
   });
 }
@@ -138,6 +163,25 @@ function getCandidatePage(url) {
 
 function chooseResult(results, meta) {
   if (!results || !results.length) return Promise.resolve(null);
+
+  // === FAST PATH: score by search titles only ===
+  var quickBest = null;
+  var quickScore = 0;
+  results.forEach(function(r) {
+    var titleScore = 0;
+    meta.titles.forEach(function(t) {
+      var s = similarity(r.title, t);
+      if (s > titleScore) titleScore = s;
+    });
+    if (titleScore > quickScore) { quickScore = titleScore; quickBest = r; }
+  });
+  if (quickBest && quickScore >= 0.85) {
+    console.log("[Akwam] FAST SELECT:", quickBest.title, "score:", quickScore.toFixed(3));
+    return getCandidatePage(quickBest.url);
+  }
+  // === end fast path ===
+
+  // Fallback: inspect every candidate
   var candidates = [];
   return Promise.all(results.map(function(result) {
     return getCandidatePage(result.url).then(function(page) {
@@ -158,11 +202,11 @@ function chooseResult(results, meta) {
       var yearScore = 0;
       if (meta.year && candidate.year && String(meta.year) === String(candidate.year)) yearScore = 0.25;
       var total = titleScore + yearScore;
-      console.log("[Akwam] Match:", candidate.title, "title:", titleScore.toFixed(3), "year:", yearScore ? "MATCH" : "NO", "total:", total.toFixed(3));
+      console.log("[Akwam] Match:", candidate.title, "title:", titleScore.toFixed(3), "total:", total.toFixed(3));
       if (total > bestScore) { bestScore = total; best = candidate; }
     });
     if (!best || bestScore < 0.80) {
-      console.log("[Akwam] No safe title match. Best score:", bestScore.toFixed(3));
+      console.log("[Akwam] No safe match. Best:", bestScore.toFixed(3));
       return null;
     }
     console.log("[Akwam] SAFE SELECT:", best.title, best.url, "score:", bestScore.toFixed(3));
@@ -172,20 +216,20 @@ function chooseResult(results, meta) {
 
 function extractWatchUrls(html) {
   var urls = [];
-  var seen = new Set();
+  var seen = {};
   var re = /href=["']([^"']*\/watch\/[^"']+)["']/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
     var url = decodeHtml(m[1]);
-    var absolute = url.startsWith("http") ? url : BASE + url;
-    if (!seen.has(absolute)) { seen.add(absolute); urls.push(absolute); }
+    var absolute = url.indexOf("http") === 0 ? url : BASE + url;
+    if (!seen[absolute]) { seen[absolute] = 1; urls.push(absolute); }
   }
   return urls;
 }
 
 function extractSources(html) {
   var streams = [];
-  var seen = new Set();
+  var seen = {};
   var re = /<source\b[^>]*>/gi;
   var tag;
   while ((tag = re.exec(html)) !== null) {
@@ -194,10 +238,10 @@ function extractSources(html) {
     if (!srcMatch) continue;
     var url = decodeHtml(srcMatch[1]).trim();
     if (!url) continue;
-    if (url.startsWith("//")) url = "https:" + url;
-    else if (url.startsWith("/")) url = BASE + url;
-    if (seen.has(url)) continue;
-    seen.add(url);
+    if (url.indexOf("//") === 0) url = "https:" + url;
+    else if (url.indexOf("/") === 0) url = BASE + url;
+    if (seen[url]) continue;
+    seen[url] = 1;
     var qualityMatch = source.match(/\bsize=["']([^"']+)["']/i) || source.match(/\blabel=["']([^"']+)["']/i);
     var quality = qualityMatch ? qualityMatch[1] : "Unknown";
     streams.push({
@@ -222,15 +266,14 @@ function flattenOnce(groups) {
 
 function getMovieStreams(tmdbId) {
   return getSearchTitle(tmdbId, "movie").then(function(meta) {
-    var searches = meta.titles.slice();
-    return Promise.all(searches.map(function(title) {
+    return Promise.all(meta.titles.map(function(title) {
       return searchAkwam(title).catch(function() { return []; });
     })).then(function(groups) {
       var all = [];
-      var seen = new Set();
+      var seen = {};
       groups.forEach(function(group) {
         group.forEach(function(result) {
-          if (!seen.has(result.url)) { seen.add(result.url); all.push(result); }
+          if (!seen[result.url]) { seen[result.url] = 1; all.push(result); }
         });
       });
       console.log("[Akwam] Unique candidates:", all.length);
@@ -254,6 +297,7 @@ function getMovieStreams(tmdbId) {
 }
 
 function getTvStreams(tmdbId, season, episode) {
+  var _wantS = Number(season) || 1;
   return getSearchTitle(tmdbId, "tv").then(function(meta) {
     console.log("[Akwam] TV search titles:", meta.titles.join(" | "), "year:", meta.year || "?");
     return Promise.all(meta.titles.map(function(title) {
@@ -263,38 +307,19 @@ function getTvStreams(tmdbId, season, episode) {
       });
     })).then(function(groups) {
       var results = [];
-      var seen = new Set();
+      var seen = {};
       groups.forEach(function(group) {
         group.forEach(function(result) {
-          if (!seen.has(result.url)) { seen.add(result.url); results.push(result); }
+          if (!seen[result.url]) { seen[result.url] = 1; results.push(result); }
         });
       });
       console.log("[Akwam] TV unique candidates:", results.length);
 
-      var _wantS = Number(season) || 1;
-      var _AR = {
-        'الاول': 1, 'الاولي': 1, 'الأول': 1, 'الأولى': 1,
-        'الثاني': 2, 'الثانية': 2,
-        'الثالث': 3, 'الثالثة': 3,
-        'الرابع': 4, 'الرابعة': 4,
-        'الخامس': 5, 'الخامسة': 5,
-        'السادس': 6, 'السادسة': 6,
-        'السابع': 7, 'السابعة': 7,
-        'الثامن': 8, 'الثامنة': 8,
-        'التاسع': 9, 'التاسعة': 9,
-        'العاشر': 10, 'العاشرة': 10
-      };
-      function _sOf(t) {
-        var m = String(t || '').match(/الموسم\s+(\S+)/);
-        if (!m) return null;
-        if (_AR[m[1]] != null) return _AR[m[1]];
-        var n = Number(m[1]);
-        return isNaN(n) ? null : n;
-      }
-      var _explicit = results.filter(function(r) { return _sOf(r.title) === _wantS; });
+      // === AKWAM-TV-V6 pre-filter season BEFORE inspection ===
+      var _explicit = results.filter(function(r) { return _parseSeason(r.title) === _wantS; });
       if (_explicit.length > 0) {
         results = _explicit;
-        console.log("[Akwam] TV season filter: S" + _wantS + " -> " + results.length + " EXACT candidates");
+        console.log("[Akwam] TV pre-filter: S" + _wantS + " -> " + results.length);
       }
 
       return chooseResult(results, meta);
@@ -306,13 +331,13 @@ function getTvStreams(tmdbId, season, episode) {
       console.log("[Akwam] TV selected:", result.title, result.url);
       return fetchText(result.url, BASE).then(function(html) {
         var episodeLinks = [];
-        var seen = new Set();
+        var seen = {};
         var re = /href=["']([^"']*\/episode\/[^"']+)["']/gi;
         var m;
         while ((m = re.exec(html)) !== null) {
           var url = decodeHtml(m[1]);
-          var absolute = url.startsWith("http") ? url : BASE + url;
-          if (!seen.has(absolute)) { seen.add(absolute); episodeLinks.push(absolute); }
+          var absolute = url.indexOf("http") === 0 ? url : BASE + url;
+          if (!seen[absolute]) { seen[absolute] = 1; episodeLinks.push(absolute); }
         }
         console.log("[Akwam] TV episode links:", episodeLinks.length);
 
@@ -329,7 +354,7 @@ function getTvStreams(tmdbId, season, episode) {
         var selected = [];
         if (_withN.length > 0) {
           selected = _withN.filter(function(u) { return _eNum(u) === wanted; });
-          console.log("[Akwam] TV ep method 1 (Arabic): " + selected.length + " of " + _withN.length);
+          console.log("[Akwam] TV ep method 1:", selected.length + " of " + _withN.length);
         }
         if (!selected.length && episodeLinks.length >= wanted) {
           var _byId = episodeLinks.map(function(u) {
@@ -338,16 +363,15 @@ function getTvStreams(tmdbId, season, episode) {
           });
           _byId.sort(function(a, b) { return a.id - b.id; });
           selected = [_byId[wanted - 1].url];
-          console.log("[Akwam] TV ep fallback (sorted by ID): E" + wanted + " = " + selected[0]);
+          console.log("[Akwam] TV ep fallback E" + wanted + " = " + selected[0]);
         }
 
         if (!selected.length) {
-          console.log("[Akwam] TV: requested episode not found:", wanted);
+          console.log("[Akwam] TV: episode not found:", wanted);
           return [];
         }
 
         return Promise.all(selected.map(function(url) {
-          console.log("[Akwam] TV episode page:", url);
           return fetchText(url, result.url).then(function(epHtml) {
             var watchUrls = extractWatchUrls(epHtml);
             console.log("[Akwam] TV watch pages:", watchUrls.length);
@@ -357,12 +381,12 @@ function getTvStreams(tmdbId, season, episode) {
                 console.log("[Akwam] TV sources:", sources.length);
                 return sources;
               }).catch(function(err) {
-                console.error("[Akwam] Watch page failed:", err.message);
+                console.error("[Akwam] Watch failed:", err.message);
                 return [];
               });
             })).then(flattenOnce);
           }).catch(function(err) {
-            console.error("[Akwam] Episode page failed:", err.message);
+            console.error("[Akwam] Episode failed:", err.message);
             return [];
           });
         })).then(flattenOnce);
@@ -376,12 +400,8 @@ function getTvStreams(tmdbId, season, episode) {
 
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log("[Akwam] getStreams:", tmdbId, mediaType, season, episode);
-  if (mediaType === "tv") {
-    return getTvStreams(tmdbId, season, episode);
-  }
+  if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
   return getMovieStreams(tmdbId);
 }
 
-module.exports = {
-  getStreams: getStreams
-};
+module.exports = { getStreams: getStreams };
