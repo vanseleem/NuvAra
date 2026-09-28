@@ -1,6 +1,6 @@
 {
   "name": "Nuv-Ara",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "scrapers": [
     {
       "id": "akwam",
@@ -36,9 +36,13 @@
       "description": "Streaming links from netmirror.",
       "version": "1.0.10",
       "author": "Nuvio Team",
-      "supportedTypes": [
-        "movie",
-        "tv"
-}
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/netmirror.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["en", "hi", "multi"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    }
   ]
 }
