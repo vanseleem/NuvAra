@@ -1,6 +1,6 @@
 {
   "name": "Nuv-Ara",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "scrapers": [
     {
       "id": "akwam",
@@ -27,6 +27,20 @@
       "enabled": true,
       "formats": ["mp4"],
       "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "iptv",
+      "name": "IPTV",
+      "description": "Personal IPTV (Xtream Codes) — your own subscription",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/iptv.js",
+      "enabled": true,
+      "formats": ["mp4", "mkv", "ts", "m3u8"],
+      "contentLanguage": ["ar", "en", "multi"],
       "limited": false,
       "supportsExternalPlayer": true
     }
