@@ -1,62 +1,23 @@
 {
-  "name": "Nuv-Ara",
-  "version": "1.2.0",
-  "scrapers": [
-    {
-      "id": "akwam",
-      "name": "Akwam",
-      "description": "Arabic movie and TV streaming provider",
-      "version": "1.0.0",
-      "author": "vanseleem",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/akwam.js",
-      "enabled": true,
-      "formats": ["mp4"],
-      "contentLanguage": ["ar"],
-      "limited": false,
-      "supportsExternalPlayer": true
-    },
-    {
-      "id": "alooytv",
-      "name": "AlooyTV",
-      "description": "Arabic movie and TV streaming provider",
-      "version": "1.0.0",
-      "author": "vanseleem",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/alooytv.js",
-      "enabled": true,
-      "formats": ["mp4"],
-      "contentLanguage": ["ar"],
-      "limited": false,
-      "supportsExternalPlayer": true
-    },
-    {
-      "id": "playimdb",
-      "name": "PlayIMDb",
-      "description": "High-Speed Direct Streaming for Movies",
-      "version": "2.0.0",
-      "author": "PirateZoro9",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/playimdb.js",
-      "enabled": true,
-      "formats": ["mp4", "mkv", "m3u8"],
-      "contentLanguage": ["en", "hi"],
-      "limited": false,
-      "supportsExternalPlayer": true
-    },
-    {
-  "id": "vidsrc",
-  "name": "VidSrc",
-  "description": "High-speed English streams (movies & TV)",
+  "id": "atlantic",
+  "name": "Atlantic",
+  "description": "English movies and TV shows with AES-GCM encrypted streams",
   "version": "1.0.0",
   "author": "vanseleem",
   "supportedTypes": ["movie", "tv"],
-  "filename": "providers/vidsrc.js",
+  "filename": "atlantic.js",
   "enabled": true,
   "formats": ["m3u8"],
   "contentLanguage": ["en"],
   "limited": false,
-  "supportsExternalPlayer": true
-}
-  ]
+  "supportsExternalPlayer": true,
+  "website": "https://atlantic.st",
+  "icon": "https://atlantic.st/favicon.ico",
+  "sourceType": "hls",
+  "notes": "Requires Node.js 15+ or modern JS runtime with crypto.subtle support. Uses direct API (stream.hls.lol) with AES-GCM decryption.",
+  "algorithm": {
+    "endpoint": "https://stream.hls.lol/helios",
+    "encryption": "AES-GCM",
+    "key": "117c358bcfcaf8fe2cfca57c9d2238a300e1c4de2efb83a5012ba84d8a31f1dd"
+  }
 }
