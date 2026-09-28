@@ -4,7 +4,7 @@
   "author": "vanseleem",
   "description": "Video streaming providers for Nuvio",
   "providers": [
-     {
+    {
       "id": "atlantic",
       "name": "Atlantic",
       "description": "English movie and TV streaming provider",
