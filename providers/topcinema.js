@@ -86,27 +86,50 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// Search via the form action we found: /search/?q=query
+// Extract content URLs from a TopCinema page — filter out navigation
+function extractContentUrls(html, baseOrigin) {
+  var urls = [];
+  var seen = {};
+  var skipPattern = /\/(category|tag|author|page|search|feed|wp-content|wp-admin|wp-json|movies|series|anime|home|about|contact|privacy|dmca|how-to-download|profile|report)\b/i;
+  var re = /href="(https:\/\/topcinema\.io\/[^"]+)"/gi;
+  var m;
+  while ((m = re.exec(html)) !== null) {
+    var u = decodeHtml(m[1]);
+    // Skip URLs with nav patterns
+    if (skipPattern.test(u)) continue;
+    // Skip short URLs (probably root or category)
+    var path = u.replace(/^https?:\/\/[^\/]+/, "");
+    if (path.length < 5) continue;
+    if (path.indexOf("/?") === 0) continue;
+    if (path.indexOf("/#") === 0) continue;
+    // Skip trailing-only slash
+    if (path === "/") continue;
+    // Skip external
+    if (u.indexOf("topcinema.io") === -1) continue;
+    if (seen[u]) continue;
+    seen[u] = 1;
+    urls.push(u);
+  }
+  return urls;
+}
+
+// Extract title from URL slug
+function titleFromUrl(u) {
+  var path = u.replace(/\/$/, "").split("/").pop();
+  var t = "";
+  try { t = decodeURIComponent(path); } catch (e) { t = path; }
+  return t.replace(/[-_]+/g, " ").trim();
+}
+
+// Search — confirmed URL format: /search/{query}/
 function searchTopCinema(query) {
-  var url = BASE + "/search/?q=" + encodeURIComponent(query);
-  console.log("[TopCinema] Search:", query);
+  var url = BASE + "/search/" + encodeURIComponent(query) + "/";
+  console.log("[TopCinema] Search:", query, url);
   return fetchText(url, BASE + "/").then(function(html) {
-    var results = [];
-    var seen = {};
-    // All TopCinema content URLs have percent-encoded Arabic (%d8 or %d9)
-    var re = /href="(https:\/\/topcinema\.io\/[^"]*%d[89][^"]*)"/gi;
-    var m;
-    while ((m = re.exec(html)) !== null) {
-      var u = decodeHtml(m[1]);
-      if (seen[u]) continue;
-      seen[u] = 1;
-      // Extract title from the last URL slug segment
-      var last = u.replace(/\/$/, "").split("/").pop();
-      var title = "";
-      try { title = decodeURIComponent(last); } catch (e) { title = last; }
-      title = title.replace(/[-_]+/g, " ").trim();
-      if (title.length > 2) results.push({ url: u, title: title });
-    }
+    var urls = extractContentUrls(html);
+    var results = urls.map(function(u) {
+      return { url: u, title: titleFromUrl(u) };
+    });
     console.log("[TopCinema] results:", query, results.length);
     return results;
   }).catch(function(err) {
@@ -133,30 +156,34 @@ function unpackEval(html) {
   return payload;
 }
 
-// Resolve VidTube embed → direct .mp4 URL(s)
+// Resolve VidTube → direct .mp4
 function resolveVidTube(vidtubeUrl) {
   console.log("[TopCinema] vidtube:", vidtubeUrl);
   return fetchText(vidtubeUrl, BASE + "/").then(function(html) {
     var urls = [];
     var seen = {};
-    // Try unpacking first
     var unpacked = unpackEval(html);
     var search = unpacked || html;
-    // Find all .mp4 URLs
+    console.log("[TopCinema] unpacked:", unpacked ? "yes" : "no", "len:", search.length);
+
+    // All .mp4 URLs
     var re = /https?:\/\/[^"'\s<>\\]+\.mp4[^"'\s<>\\]*/gi;
     var m;
     while ((m = re.exec(search)) !== null) {
       var u = m[0].replace(/\\\//g, "/").replace(/\\u0026/g, "&");
       if (!seen[u]) { seen[u] = 1; urls.push(u); }
     }
-    // Also try file: "..." pattern
+    // file: "..." pattern
     var re2 = /file\s*:\s*["']([^"']+)["']/gi;
     while ((m = re2.exec(search)) !== null) {
       var u2 = m[1].replace(/\\\//g, "/");
-      if (u2.indexOf("http") === 0 && !seen[u2]) {
-        seen[u2] = 1;
-        urls.push(u2);
-      }
+      if (u2.indexOf("http") === 0 && !seen[u2]) { seen[u2] = 1; urls.push(u2); }
+    }
+    // sources: [...] src: "..." pattern
+    var re3 = /src\s*:\s*["']([^"']+\.mp4[^"']*)["']/gi;
+    while ((m = re3.exec(search)) !== null) {
+      var u3 = m[1].replace(/\\\//g, "/");
+      if (u3.indexOf("http") === 0 && !seen[u3]) { seen[u3] = 1; urls.push(u3); }
     }
     console.log("[TopCinema] vidtube mp4s:", urls.length);
     return urls;
@@ -166,43 +193,53 @@ function resolveVidTube(vidtubeUrl) {
   });
 }
 
-// Find the /watch/ link on a movie/episode page
+// Find /watch/ link on a movie/episode page
 function findWatchLink(html, pageUrl) {
   var m = html.match(/href=["']([^"']*\/watch\/?)["']/i);
   if (m) {
     var u = decodeHtml(m[1]);
     return u.indexOf("http") === 0 ? u : BASE + u;
   }
-  // Fallback: append /watch/
   if (pageUrl && pageUrl.indexOf("/watch") === -1) {
     return pageUrl.replace(/\/?$/, "/watch/");
   }
   return null;
 }
 
-// Extract streams from a watch page
+// Get streams from a watch page
 function getStreamsFromWatchPage(watchUrl) {
   return fetchText(watchUrl, BASE + "/").then(function(html) {
-    // Look for VidTube iframe
+    // Find VidTube iframe
     var m = html.match(/<iframe[^>]*src=["']([^"']*vidtube[^"']*)["']/i);
     if (m) {
       var vtUrl = decodeHtml(m[1]);
       if (vtUrl.indexOf("//") === 0) vtUrl = "https:" + vtUrl;
+      console.log("[TopCinema] found vidtube iframe");
       return resolveVidTube(vtUrl);
+    }
+    // Fallback: any external iframe
+    var m2 = html.match(/<iframe[^>]*src=["']([^"']+)["']/i);
+    if (m2) {
+      var anyUrl = decodeHtml(m2[1]);
+      if (anyUrl.indexOf("//") === 0) anyUrl = "https:" + anyUrl;
+      console.log("[TopCinema] other iframe:", anyUrl);
+      // If it's vidtube-like, resolve
+      if (/vidtube|down\.|embed/.test(anyUrl)) {
+        return resolveVidTube(anyUrl);
+      }
     }
     // Fallback: direct .mp4 in watch page
     var urls = [];
     var seen = {};
     var re = /https?:\/\/[^"'\s<>]+\.mp4/gi;
-    while ((m = re.exec(html)) !== null) {
-      var u = m[0];
-      if (!seen[u]) { seen[u] = 1; urls.push(u); }
+    var mm;
+    while ((mm = re.exec(html)) !== null) {
+      if (!seen[mm[0]]) { seen[mm[0]] = 1; urls.push(mm[0]); }
     }
     return urls;
   });
 }
 
-// Pick best match from search results
 function pickBest(all, meta) {
   var best = null, bestScore = 0;
   all.forEach(function(r) {
@@ -213,7 +250,7 @@ function pickBest(all, meta) {
     });
     if (s > bestScore) { bestScore = s; best = r; }
   });
-  if (best) console.log("[TopCinema] best match:", best.title, "score:", bestScore.toFixed(2));
+  if (best) console.log("[TopCinema] best:", best.title, bestScore.toFixed(2));
   return best && bestScore >= 0.3 ? best : null;
 }
 
@@ -270,16 +307,17 @@ function getTvStreams(tmdbId, season, episode) {
       });
       if (!all.length) return [];
 
-      // Filter by episode number if we can detect it
+      // Try to narrow by episode number in URL
       var epMatches = [];
       all.forEach(function(r) {
         var dec = "";
         try { dec = decodeURIComponent(r.url); } catch (e) { dec = r.url; }
-        var mm = dec.match(/الحلق[ةه][-_ ]?(\d+)/i);
+        var mm = dec.match(/الحلق[ةه][-_ ]?(\d+)/i) || dec.match(/episode[-_ ]?(\d+)/i);
         if (mm && Number(mm[1]) === wanted) epMatches.push(r);
       });
-
       var candidates = epMatches.length ? epMatches : all;
+      console.log("[TopCinema] TV candidates:", candidates.length, "ep-matches:", epMatches.length);
+
       var best = pickBest(candidates, meta);
       if (!best) return [];
 
