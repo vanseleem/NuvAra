@@ -169,8 +169,8 @@ function qualityFromUrl(url) {
 }
 function makeStream(url, episode) {
   return {
-    name: "AlooyTV",
-    title: `AlooyTV \u2022 Episode ${episode}`,
+    name: "🎉 AlooyTV",
+    title: `🎉 AlooyTV \u2022 Episode ${episode}`,
     url,
     quality: qualityFromUrl(url),
     headers: {
