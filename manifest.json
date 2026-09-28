@@ -63,25 +63,13 @@
       "description": "Netflix | Prime | Disney",
       "version": "1.0.0",
       "author": "Dustincos",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
+      "supportedTypes": ["movie", "tv"],
       "filename": "providers/netmirror.js",
       "enabled": true,
       "hasSettings": true,
-      "formats": [
-        "mp4",
-        "m3u8",
-        "mkv"
-      ],
+      "formats": ["mp4", "m3u8", "mkv"],
       "logo": "https://i.postimg.cc/L64M3bYV/netmirror.png",
-      "contentLanguage": [
-        "en",
-        "hi",
-        "ta",
-        "te"
-      ]
+      "contentLanguage": ["en", "hi", "ta", "te"]
     },
     {
       "id": "playimdb",
