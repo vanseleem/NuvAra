@@ -45,7 +45,7 @@
     },
    {
       "id": "movix",
-      "name": "Movix VF",
+      "name": "MovixFX",
       "description": "Movies and TV series in English & French (dubbed/subtitled)",
       "version": "1.0.0",
       "author": "wooodyhood",
@@ -53,7 +53,7 @@
         "movie",
         "tv"
       ],
-      "filename": "providers/movix.js",
+      "filename": "providers/movixFX.js",
       "enabled": true,
       "formats": [
         "mp4",
