@@ -29,6 +29,20 @@
       "contentLanguage": ["ar"],
       "limited": false,
       "supportsExternalPlayer": true
+    },
+    {
+      "id": "mycima",
+      "name": "MyCima",
+      "description": "Arabic movie and TV streaming provider",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/mycima.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
     }
   ]
 }
