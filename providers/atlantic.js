@@ -12,17 +12,6 @@ function hexToBytes(hex) {
   return bytes;
 }
 
-function qualityFromUrl(url) {
-  var s = String(url).toLowerCase();
-  if (/2160|4k/.test(s)) return "4K";
-  if (/1440/.test(s)) return "1440p";
-  if (/1080/.test(s)) return "1080p";
-  if (/720/.test(s)) return "720p";
-  if (/480/.test(s)) return "480p";
-  if (/360/.test(s)) return "360p";
-  return null;
-}
-
 function decryptHeliosUrl(encryptedUrl) {
   return new Promise(function(resolve, reject) {
     if (!encryptedUrl.startsWith("hl_")) {
@@ -83,6 +72,7 @@ function fetchHelios(tmdbId, mediaType, season, episode) {
         return response.json();
       })
       .then(function(data) {
+        console.log("[Atlantic] Raw sources:", JSON.stringify(data.sources));
         resolve(data.sources || {});
       })
       .catch(function(error) {
@@ -92,8 +82,46 @@ function fetchHelios(tmdbId, mediaType, season, episode) {
   });
 }
 
-function makeStream(url, server, label) {
-  var quality = qualityFromUrl(url) || (label && label !== "Auto" ? label : null) || "Auto";
+function fetchM3u8Quality(m3u8Url) {
+  return new Promise(function(resolve) {
+    var fetchOptions = {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Referer": "https://atlantic.st/"
+      }
+    };
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      fetchOptions.signal = AbortSignal.timeout(5000);
+    }
+    fetch(m3u8Url, fetchOptions)
+      .then(function(response) {
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.text();
+      })
+      .then(function(text) {
+        // Find highest RESOLUTION= in master playlist
+        var matches = text.match(/RESOLUTION=(\d+)x(\d+)/g);
+        if (!matches || matches.length === 0) {
+          resolve("Auto");
+          return;
+        }
+        var highest = 0;
+        matches.forEach(function(m) {
+          var parts = m.match(/RESOLUTION=(\d+)x(\d+)/);
+          if (parts) {
+            var h = parseInt(parts[2]);
+            if (h > highest) highest = h;
+          }
+        });
+        resolve(highest > 0 ? highest + "p" : "Auto");
+      })
+      .catch(function() {
+        resolve("Auto");
+      });
+  });
+}
+
+function makeStream(url, server, quality) {
   return {
     name: "✨ Atlantic",
     title: "✨ Atlantic • " + server + " • " + quality,
@@ -133,17 +161,21 @@ function getStreams(tmdbId, mediaType, season, episode) {
             .then(function(m3u8Url) {
               if (seen[m3u8Url]) return null;
               seen[m3u8Url] = true;
-              return makeStream(m3u8Url, serverName, source.label || null);
+              return fetchM3u8Quality(m3u8Url)
+                .then(function(quality) {
+                  console.log("[Atlantic] " + serverName + " quality: " + quality);
+                  return makeStream(m3u8Url, serverName, quality);
+                });
             })
             .catch(function(err) {
-              console.error("[Atlantic] Failed to decrypt " + serverName + ":", err.message);
+              console.error("[Atlantic] Failed to process " + serverName + ":", err.message);
               return null;
             });
         });
         return Promise.all(streamPromises);
       })
       .then(function(results) {
-        var streams = results.filter(function(s) { return s !== null; });
+        var streams = (results || []).filter(function(s) { return s !== null; });
         console.log("[Atlantic] Total streams:", streams.length);
         resolve(streams);
       })
