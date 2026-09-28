@@ -1,6 +1,6 @@
 {
   "name": "Nuv-Ara",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "scrapers": [
     {
       "id": "akwam",
@@ -24,6 +24,34 @@
       "author": "vanseleem",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/alooytv.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "egybest",
+      "name": "EgyBest",
+      "description": "Arabic movies and TV — 18,000+ titles",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/egybest.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "topcinema",
+      "name": "TopCinema",
+      "description": "Arabic movies, TV, and anime — UpDown, VidTube, DoodStream",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/topcinema.js",
       "enabled": true,
       "formats": ["mp4"],
       "contentLanguage": ["ar"],
