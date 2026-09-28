@@ -1,0 +1,48 @@
+{
+  "name": "Nuv-Ara",
+  "version": "1.1.0",
+  "scrapers": [
+    {
+      "id": "akwam",
+      "name": "Akwam",
+      "description": "Arabic movie and TV streaming provider",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/akwam.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "alooytv",
+      "name": "AlooyTV",
+      "description": "Arabic movie and TV streaming provider",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/alooytv.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "wecima",
+      "name": "WeCima",
+      "description": "Arabic movie and TV streaming provider",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/wecima.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    }
+  ]
+}
