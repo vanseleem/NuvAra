@@ -31,6 +31,19 @@
       "supportsExternalPlayer": true
     },
     {
+      "id": "mycima",
+      "name": "mycima",
+      "description": "Arabic movie and TV streaming provider",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/mycima.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    {
       "id": "nuvio-movix",
       "name": "Movix",
       "description": "Movies and TV series in English & subtitled or dubbed French (~5s)",
