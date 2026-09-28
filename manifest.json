@@ -1,23 +1,31 @@
 {
-  "id": "atlantic",
-  "name": "Atlantic",
-  "description": "English movies and TV shows with AES-GCM encrypted streams",
   "version": "1.0.0",
+  "name": "NuvAra Providers",
   "author": "vanseleem",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "atlantic.js",
-  "enabled": true,
-  "formats": ["m3u8"],
-  "contentLanguage": ["en"],
-  "limited": false,
-  "supportsExternalPlayer": true,
-  "website": "https://atlantic.st",
-  "icon": "https://atlantic.st/favicon.ico",
-  "sourceType": "hls",
-  "notes": "Requires Node.js 15+ or modern JS runtime with crypto.subtle support. Uses direct API (stream.hls.lol) with AES-GCM decryption.",
-  "algorithm": {
-    "endpoint": "https://stream.hls.lol/helios",
-    "encryption": "AES-GCM",
-    "key": "117c358bcfcaf8fe2cfca57c9d2238a300e1c4de2efb83a5012ba84d8a31f1dd"
-  }
+  "description": "Video streaming providers for Nuvio",
+  "providers": [
+    {
+      "id": "atlantic",
+      "name": "Atlantic",
+      "description": "English movies and TV shows with encrypted streams",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "atlantic.js",
+      "enabled": true,
+      "formats": [
+        "m3u8"
+      ],
+      "contentLanguage": [
+        "en"
+      ],
+      "limited": false,
+      "supportsExternalPlayer": true,
+      "website": "https://atlantic.st",
+      "icon": "https://atlantic.st/favicon.ico"
+   }
+  ]
 }
