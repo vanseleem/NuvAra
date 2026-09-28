@@ -1,6 +1,6 @@
 {
   "name": "Nuv-Ara",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "scrapers": [
     {
       "id": "akwam",
@@ -33,16 +33,48 @@
     {
       "id": "playimdb",
       "name": "PlayIMDb",
-      "description": "High-Speed Direct Streaming for Movies",
+      "description": "High-Speed Direct Streaming for Movies and TV (IMDb ID Extract)",
       "version": "2.0.0",
       "author": "PirateZoro9",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/playimdb.js",
       "enabled": true,
+      "hasSettings": true,
       "formats": ["mp4", "mkv", "m3u8"],
+      "logo": "https://i.postimg.cc/KzjPtYWY/imdb.png",
       "contentLanguage": ["en", "hi"],
       "limited": false,
       "supportsExternalPlayer": true
+    },
+    {
+      "id": "fibwatch",
+      "name": "FibWatch",
+      "description": "FibWatch movie and TV streams with episode selection",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/fibwatch.js",
+      "enabled": true,
+      "formats": ["mp4"],
+      "contentLanguage": ["en"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "netmirror",
+      "name": "NetMirror",
+      "description": "Streaming links from netmirror",
+      "version": "1.0.10",
+      "author": "Nuvio Team",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/netmirror.js",
+      "enabled": true,
+      "hasSettings": true,
+      "logo": "https://net22.cc/favicon.ico",
+      "formats": ["mp4"],
+      "contentLanguage": ["en"],
+      "limited": false,
+      "supportsExternalPlayer": false
     }
   ]
 }
