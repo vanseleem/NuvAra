@@ -31,17 +31,14 @@
       "supportsExternalPlayer": true
     },
     {
-  "id": "playimdb",
-  "name": "PlayIMDb",
-  "description": "High-Speed Direct Streaming for Movies",
-  "version": "2.0.0",
-  "author": "PirateZoro9",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "providers/playimdb.js",
-  "enabled": true,
-  "hasSettings": true,
-  "formats": ["mp4", "mkv", "m3u8"],
-  "contentLanguage": ["en", "hi"]
+      "id": "netmirror",
+      "name": "NetMirror",
+      "description": "Streaming links from netmirror.",
+      "version": "1.0.10",
+      "author": "Nuvio Team",
+      "supportedTypes": [
+        "movie",
+        "tv"
 }
   ]
 }
