@@ -201,8 +201,8 @@ function extractSources(html) {
     var qualityMatch = source.match(/\bsize=["']([^"']+)["']/i) || source.match(/\blabel=["']([^"']+)["']/i);
     var quality = qualityMatch ? qualityMatch[1] : "Unknown";
     streams.push({
-      name: "Akwam",
-      title: quality === "Unknown" ? "Akwam" : "Akwam " + quality,
+      name: "✨ Akwam",
+      title: quality === "Unknown" ? "✨ Akwam" : "✨ Akwam " + quality,
       url: url,
       quality: quality
     });
