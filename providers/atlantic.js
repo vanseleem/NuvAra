@@ -1,11 +1,9 @@
 "use strict";
 
-// --- Configuration (unchanged) ---
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 var HELIOS_API = "https://stream.hls.lol";
 var AES_GCM_KEY_HEX = "117c358bcfcaf8fe2cfca57c9d2238a300e1c4de2efb83a5012ba84d8a31f1dd";
 
-// --- Helper: Hex to Uint8Array (unchanged) ---
 function hexToBytes(hex) {
   var bytes = new Uint8Array(hex.length / 2);
   for (var i = 0; i < hex.length; i += 2) {
@@ -14,7 +12,17 @@ function hexToBytes(hex) {
   return bytes;
 }
 
-// --- Decryption (Promise-based, no async/await) ---
+function qualityFromUrl(url) {
+  var s = String(url).toLowerCase();
+  if (/2160|4k/.test(s)) return "4K";
+  if (/1440/.test(s)) return "1440p";
+  if (/1080/.test(s)) return "1080p";
+  if (/720/.test(s)) return "720p";
+  if (/480/.test(s)) return "480p";
+  if (/360/.test(s)) return "360p";
+  return null;
+}
+
 function decryptHeliosUrl(encryptedUrl) {
   return new Promise(function(resolve, reject) {
     if (!encryptedUrl.startsWith("hl_")) {
@@ -30,7 +38,6 @@ function decryptHeliosUrl(encryptedUrl) {
     var iv = encryptedBytes.slice(0, 12);
     var ciphertext = encryptedBytes.slice(12);
     if (typeof crypto === "undefined" || !crypto.subtle) {
-      // Fallback: cannot decrypt
       console.warn("[Atlantic] crypto.subtle unavailable, returning encrypted URL.");
       resolve(encryptedUrl);
       return;
@@ -50,7 +57,6 @@ function decryptHeliosUrl(encryptedUrl) {
   });
 }
 
-// --- Fetch Helios (Promise-based, no async/await) ---
 function fetchHelios(tmdbId, mediaType, season, episode) {
   return new Promise(function(resolve, reject) {
     var params = new URLSearchParams();
@@ -62,18 +68,15 @@ function fetchHelios(tmdbId, mediaType, season, episode) {
     }
     var url = HELIOS_API + "/helios?" + params.toString();
     console.log("[Atlantic] Fetching:", url);
-
     var fetchOptions = {
       headers: {
         "User-Agent": USER_AGENT,
         "Accept": "application/json"
       }
     };
-    // Safely add timeout if AbortSignal.timeout exists
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
       fetchOptions.signal = AbortSignal.timeout(10000);
     }
-
     fetch(url, fetchOptions)
       .then(function(response) {
         if (!response.ok) throw new Error("HTTP " + response.status);
@@ -89,13 +92,13 @@ function fetchHelios(tmdbId, mediaType, season, episode) {
   });
 }
 
-// --- Stream Object Builder (unchanged) ---
-function makeStream(url, server, quality) {
+function makeStream(url, server, label) {
+  var quality = qualityFromUrl(url) || (label && label !== "Auto" ? label : null) || "Auto";
   return {
-    name: "Atlantic",
-    title: "Atlantic • " + server,
+    name: "✨ Atlantic",
+    title: "✨ Atlantic • " + server + " • " + quality,
     url: url,
-    quality: quality || "Auto",
+    quality: quality,
     headers: {
       "User-Agent": USER_AGENT,
       "Referer": "https://atlantic.st/"
@@ -103,11 +106,9 @@ function makeStream(url, server, quality) {
   };
 }
 
-// --- Main getStreams (Promise-based) ---
 function getStreams(tmdbId, mediaType, season, episode) {
   return new Promise(function(resolve, reject) {
     console.log("[Atlantic] Request:", tmdbId, mediaType, season, episode);
-
     if (!tmdbId || (mediaType !== "movie" && mediaType !== "tv")) {
       resolve([]);
       return;
@@ -116,7 +117,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
       resolve([]);
       return;
     }
-
     fetchHelios(tmdbId, mediaType, season, episode)
       .then(function(sources) {
         var keys = Object.keys(sources);
@@ -133,7 +133,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
             .then(function(m3u8Url) {
               if (seen[m3u8Url]) return null;
               seen[m3u8Url] = true;
-              return makeStream(m3u8Url, serverName, source.label || "Auto");
+              return makeStream(m3u8Url, serverName, source.label || null);
             })
             .catch(function(err) {
               console.error("[Atlantic] Failed to decrypt " + serverName + ":", err.message);
@@ -149,12 +149,11 @@ function getStreams(tmdbId, mediaType, season, episode) {
       })
       .catch(function(error) {
         console.error("[Atlantic] getStreams error:", error.message);
-        resolve([]); // Resolve with empty array on failure
+        resolve([]);
       });
   });
 }
 
-// --- Export for Nuvio ---
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { getStreams: getStreams };
 } else {
