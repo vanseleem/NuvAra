@@ -32,17 +32,16 @@
     },
     {
       "id": "netmirror",
-      "name": "NetMirror",
-      "description": "Streaming links from netmirror.",
-      "version": "1.0.10",
-      "author": "Nuvio Team",
+      "name": "Netmirror",
+      "description": "Streaming links from Netmirror (Netflix, Prime, Disney etc).",
+      "version": "1.0.0",
+      "author": "Sanchit (@S4NCHITT) — Murph's Streams",
       "supportedTypes": ["movie", "tv"],
       "filename": "providers/netmirror.js",
       "enabled": true,
-      "formats": ["mp4"],
-      "contentLanguage": ["en", "hi", "multi"],
-      "limited": false,
-      "supportsExternalPlayer": true
+      "formats": ["mp4", "m3u8"],
+      "logo": "https://i.postimg.cc/L64M3bYV/netmirror.png",
+      "contentLanguage": ["en"]
     }
   ]
 }
