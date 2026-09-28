@@ -43,6 +43,20 @@
       "contentLanguage": ["en", "hi"],
       "limited": false,
       "supportsExternalPlayer": true
-    }
+    },
+    {
+  "id": "vidsrc",
+  "name": "VidSrc",
+  "description": "High-speed English streams (movies & TV)",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/vidsrc.js",
+  "enabled": true,
+  "formats": ["m3u8"],
+  "contentLanguage": ["en"],
+  "limited": false,
+  "supportsExternalPlayer": true
+}
   ]
 }
