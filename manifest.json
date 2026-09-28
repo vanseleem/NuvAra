@@ -4,28 +4,19 @@
   "author": "vanseleem",
   "description": "Video streaming providers for Nuvio",
   "providers": [
-    {
+     {
       "id": "atlantic",
       "name": "Atlantic",
-      "description": "English movies and TV shows with encrypted streams",
+      "description": "English movie and TV streaming provider",
       "version": "1.0.0",
       "author": "vanseleem",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
-      "filename": "atlantic.js",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/atlantic.js",
       "enabled": true,
-      "formats": [
-        "m3u8"
-      ],
-      "contentLanguage": [
-        "en"
-      ],
+      "formats": ["m3u8"],
+      "contentLanguage": ["en"],
       "limited": false,
-      "supportsExternalPlayer": true,
-      "website": "https://atlantic.st",
-      "icon": "https://atlantic.st/favicon.ico"
-   }
+      "supportsExternalPlayer": true
+    }
   ]
 }
