@@ -172,7 +172,7 @@ function makeStream(url, episode) {
     name: "🎉 AlooyTV",
     title: `🎉 AlooyTV \u2022 Episode ${episode}`,
     url,
-    quality: qualityFromUrl(url),
+    quality: "Auto",
     headers: {
       "User-Agent": USER_AGENT,
       "Referer": DOMAIN + "/"
