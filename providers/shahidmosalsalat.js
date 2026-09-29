@@ -118,33 +118,45 @@ function extractEmbedUrl(watchHtml) {
   return null;
 }
 
-// === VK video resolver: extracts direct mp4 URLs from vk.com/video_ext.php ===
+// === VK resolver — extracts HLS URL from vk.com/video_ext.php ===
 function resolveVk(vkUrl) {
   console.log("[ShahidMosalsalat] VK:", vkUrl);
   return fetchText(vkUrl, "https://vk.com/").then(function(vkHtml) {
     var urls = [];
     var seen = {};
+
+    function decode(u) {
+      if (!u) return "";
+      return String(u)
+        .replace(/\\\//g, "/")
+        .replace(/\\u0026/g, "&")
+        .replace(/\\u002F/g, "/")
+        .replace(/&amp;/g, "&");
+    }
+
     function add(u) {
+      u = decode(u);
       if (!u) return;
-      u = String(u).replace(/\\\//g, "/").replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
       if (u.indexOf("http") !== 0) return;
       if (seen[u]) return;
       seen[u] = 1;
       urls.push(u);
     }
+
     var m;
-    // VK flashvars: url240, url360, url480, url720, url1080
-    var re1 = /(?:url|src)(\d{3,4})\s*[:=]\s*["']([^"']+)["']/gi;
-    while ((m = re1.exec(vkHtml)) !== null) add(m[2]);
-    // JSON "url": "..."
-    var re2 = /"url"\s*:\s*"(https?:[^"]+)"/gi;
-    while ((m = re2.exec(vkHtml)) !== null) add(m[1]);
-    // HLS
-    var re3 = /"hls"\s*:\s*"(https?:[^"]+)"/gi;
-    while ((m = re3.exec(vkHtml)) !== null) add(m[1]);
-    // Any .mp4 anywhere
-    var re4 = /https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*/gi;
-    while ((m = re4.exec(vkHtml)) !== null) add(m[0]);
+
+    // 1) PRIMARY: HLS field — new VK format
+    var hlsRe = /"hls"\s*:\s*"([^"]+)"/gi;
+    while ((m = hlsRe.exec(vkHtml)) !== null) add(m[1]);
+
+    // 2) Legacy: url240, url360, url480, url720, url1080
+    var urlRe = /"url(\d{3,4})"\s*:\s*"([^"]+)"/gi;
+    while ((m = urlRe.exec(vkHtml)) !== null) add(m[2]);
+
+    // 3) Any direct m3u8/mp4 anywhere in the page
+    var rawRe = /https?:\\?\/\\?\/[^"'\s<>]+\.(?:m3u8|mp4)[^"'\s<>]*/gi;
+    while ((m = rawRe.exec(vkHtml)) !== null) add(m[0]);
+
     console.log("[ShahidMosalsalat] VK URLs found:", urls.length);
     return urls;
   });
@@ -163,11 +175,13 @@ function qualityFromUrl(url) {
 
 function makeStream(url, label) {
   if (url.indexOf("http://") === 0) url = "https://" + url.slice(7);
+  var isHls = /\.m3u8/i.test(url);
   return {
     name: "⚜️ ShahidMosalsalat",
     title: label ? "⚜️ ShahidMosalsalat \u2022 " + label : "⚜️ ShahidMosalsalat",
     url: url,
     quality: qualityFromUrl(url),
+    type: isHls ? "hls" : "mp4",
     referer: "https://vk.com/",
     headers: {
       "User-Agent": UA,
