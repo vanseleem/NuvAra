@@ -119,19 +119,6 @@ function extractEpisodeLink(html, base, wantedEpisode) {
   }
   return null;
 }
-function extractKeyLink(html, base) {
-  const re = /href\s*=\s*["']([^"']*\/watch\/[^"']*\?key=[^"']+)["']/i;
-  const m = html.match(re);
-  if (!m)
-    return null;
-  let absolute;
-  try {
-    absolute = absoluteUrl(decodeHtml(m[1]).trim(), base);
-  } catch (_) {
-    return null;
-  }
-  return absolute;
-}
 function extractSources(html) {
   const sources = [];
   function add(url) {
@@ -142,9 +129,6 @@ function extractSources(html) {
       url = "https:" + url;
     }
     if (!/^https?:\/\//i.test(url)) {
-      return;
-    }
-    if (/^https?:\/\/vid\d+\.0\/?$/i.test(url)) {
       return;
     }
     if (!sources.includes(url)) {
@@ -195,18 +179,6 @@ function makeStream(url, episode) {
     }
   };
 }
-function makeMovieStream(url, title) {
-  return {
-    name: "🎉 AlooyTV",
-    title: title ? `🎉 AlooyTV \u2022 ${title}` : "🎉 AlooyTV",
-    url,
-    quality: qualityFromUrl(url),
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Referer": DOMAIN + "/"
-    }
-  };
-}
 function tmdbTitles(tmdbId, mediaType) {
   return __async(this, null, function* () {
     const type = mediaType === "movie" ? "movie" : "tv";
@@ -248,25 +220,19 @@ function getStreams(tmdbId, mediaType, season, episode) {
     );
     if (!tmdbId)
       return [];
-    if (mediaType !== "movie" && mediaType !== "tv")
+    if (mediaType !== "tv")
       return [];
-
-    const isMovie = mediaType === "movie";
-    const wantedEpisode = isMovie ? null : Number(episode);
-    if (!isMovie) {
-      if (!episode)
-        return [];
-      if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
-        return [];
-      }
+    if (!episode)
+      return [];
+    const wantedEpisode = Number(episode);
+    if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
+      return [];
     }
-
     let titles = yield tmdbTitles(tmdbId, mediaType);
     console.log("[AlooyTV] Titles:", titles);
     if (!titles.length) {
       titles = [String(tmdbId)];
     }
-
     const watchPages = [];
     for (const title of titles) {
       try {
@@ -295,80 +261,55 @@ function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
     console.log("[AlooyTV] Watch pages:", watchPages.length);
-
     const streams = [];
     const seen = /* @__PURE__ */ new Set();
-
     for (const watchUrl of watchPages) {
       try {
-        if (isMovie) {
-          const baseHtml = yield get(watchUrl, DOMAIN + "/");
-          const keyUrl = extractKeyLink(baseHtml, watchUrl);
-          console.log("[AlooyTV] Movie key URL:", keyUrl || "NOT FOUND");
-          if (!keyUrl) {
+        const seriesHtml = yield get(
+          watchUrl,
+          DOMAIN + "/"
+        );
+        const episodeUrl = extractEpisodeLink(
+          seriesHtml,
+          watchUrl,
+          wantedEpisode
+        );
+        console.log(
+          `[AlooyTV] Episode ${wantedEpisode} link:`,
+          episodeUrl || "NOT FOUND"
+        );
+        if (!episodeUrl) {
+          continue;
+        }
+        const episodeHtml = yield get(
+          episodeUrl,
+          watchUrl
+        );
+        const sources = extractSources(episodeHtml);
+        console.log(
+          `[AlooyTV] Episode ${wantedEpisode} sources:`,
+          sources.length
+        );
+        for (const source of sources) {
+          if (seen.has(source)) {
             continue;
           }
-          const keyedHtml = yield get(keyUrl, watchUrl);
-          const sources = extractSources(keyedHtml);
-          console.log("[AlooyTV] Movie sources:", sources.length);
-          for (const source of sources) {
-            if (seen.has(source)) {
-              continue;
-            }
-            seen.add(source);
-            streams.push(makeMovieStream(source, titles[0]));
-          }
-          if (streams.length) {
-            break;
-          }
-        } else {
-          const seriesHtml = yield get(
-            watchUrl,
-            DOMAIN + "/"
+          seen.add(source);
+          streams.push(
+            makeStream(source, wantedEpisode)
           );
-          const episodeUrl = extractEpisodeLink(
-            seriesHtml,
-            watchUrl,
-            wantedEpisode
-          );
-          console.log(
-            `[AlooyTV] Episode ${wantedEpisode} link:`,
-            episodeUrl || "NOT FOUND"
-          );
-          if (!episodeUrl) {
-            continue;
-          }
-          const episodeHtml = yield get(
-            episodeUrl,
-            watchUrl
-          );
-          const sources = extractSources(episodeHtml);
-          console.log(
-            `[AlooyTV] Episode ${wantedEpisode} sources:`,
-            sources.length
-          );
-          for (const source of sources) {
-            if (seen.has(source)) {
-              continue;
-            }
-            seen.add(source);
-            streams.push(
-              makeStream(source, wantedEpisode)
-            );
-          }
-          if (streams.length) {
-            break;
-          }
+        }
+        if (streams.length) {
+          break;
         }
       } catch (e) {
         console.log(
-          "[AlooyTV] Watch failed:",
+          "[AlooyTV] Watch/episode failed:",
           watchUrl,
           e.message
         );
       }
     }
-
     console.log(
       "[AlooyTV] Final streams:",
       streams.length
