@@ -72,14 +72,14 @@ function getTmdbTitles(tmdbId, mediaType) {
         if (ds) year = ds.slice(0, 4);
       }
     });
-    console.log("[q-drama] TMDB titles:", titles.join(" | "));
+    console.log("[QDrama] TMDB titles:", titles.join(" | "));
     return { titles: titles, year: year };
   });
 }
 
 function searchQdrama(query) {
   var url = BASE + "/search.php?keywords=" + encodeURIComponent(query);
-  console.log("[q-drama] Search:", query);
+  console.log("[QDrama] Search:", query);
   return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
     var seen = {};
@@ -93,7 +93,7 @@ function searchQdrama(query) {
       seen[abs] = 1;
       results.push({ url: abs, title: title });
     }
-    console.log("[q-drama] Search results:", results.length);
+    console.log("[QDrama] Search results:", results.length);
     return results;
   });
 }
@@ -131,14 +131,14 @@ function extractM3u8(html) {
 }
 
 function resolveLiiivideo(embedUrl) {
-  console.log("[q-drama] Liiivideo:", embedUrl);
+  console.log("[QDrama] Liiivideo:", embedUrl);
   return fetchText(embedUrl, BASE + "/").then(function(html) {
     var m3u8 = extractM3u8(html);
     if (m3u8) {
-      console.log("[q-drama] Found M3U8:", m3u8);
+      console.log("[QDrama] Found M3U8:", m3u8);
       return m3u8;
     }
-    console.log("[q-drama] No M3U8 in liiivideo page");
+    console.log("[QDrama] No M3U8 in liiivideo page");
     return null;
   });
 }
@@ -159,7 +159,7 @@ function getStreamsFromWatchPage(watchUrl) {
     if (embedMatch) {
       var embedUrl = decodeHtml(embedMatch[1]);
       if (!embedUrl.startsWith("http")) embedUrl = BASE + "/" + embedUrl.replace(/^\//, "");
-      console.log("[q-drama] Embed URL:", embedUrl);
+      console.log("[QDrama] Embed URL:", embedUrl);
       return fetchText(embedUrl, watchUrl).then(function(embedHtml) {
         var liiMatch2 = embedHtml.match(/(?:https?:)?\/\/[^"'\s<>]*liiivideo[^"'\s<>]*/i);
         if (liiMatch2) {
@@ -179,7 +179,7 @@ function getStreamsFromWatchPage(watchUrl) {
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
-  console.log("[q-drama] getStreams:", tmdbId, mediaType, season, episode);
+  console.log("[QDrama] getStreams:", tmdbId, mediaType, season, episode);
   return getTmdbTitles(tmdbId, mediaType).then(function(meta) {
     return Promise.all(meta.titles.map(function(t) {
       return searchQdrama(t).catch(function() { return []; });
@@ -191,7 +191,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
           if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
         });
       });
-      console.log("[q-drama] Unique results:", all.length);
+      console.log("[QDrama] Unique results:", all.length);
 
       var wanted = Number(episode) || 1;
       var candidates = all.filter(function(r) {
@@ -220,10 +220,10 @@ function getStreams(tmdbId, mediaType, season, episode) {
           return getStreamsFromWatchPage(c.url).then(function(urls) {
             return urls.map(function(u, i) {
               return {
-                name: "q-drama",
-                title: "q-drama " + (i + 1),
+                name: "🧿 QDrama",
+                title: "🧿 QDrama • Auto",
                 url: u,
-                quality: "Unknown",
+                quality: "Auto",
                 referer: BASE + "/"
               };
             });
@@ -233,7 +233,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return chain;
     });
   }).catch(function(err) {
-    console.log("[q-drama] Error:", err.message);
+    console.log("[QDrama] Error:", err.message);
     return [];
   });
 }
