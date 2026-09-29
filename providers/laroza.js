@@ -84,30 +84,37 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
+// === SEARCH: extract vid + title from <a title="..."> attribute ===
 function searchLaroza(title) {
   var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
   var url = BASE + "/search.php?keywords=" + encodeURIComponent(cleanTitle);
-  console.log("[Laroza] Search:", url);
+  console.log("[Laroza] Search:", cleanTitle);
   return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
     var seen = {};
-    var re = /href=["']([^"']*\/video\.php\?vid=[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    // Match: <a href="...video.php?vid=XXX" title="TITLE">
+    var re = /<a[^>]*href=["']([^"']*\/video\.php\?vid=([^"'&]+))["'][^>]*title=["']([^"']+)["'][^>]*>/gi;
     var m;
     while ((m = re.exec(html)) !== null) {
-      var href = decodeHtml(m[1]);
-      if (seen[href]) continue;
-      seen[href] = 1;
-      var absolute = href.indexOf("http") === 0 ? href : BASE + href;
-      var block = m[2];
-      var titleMatch = block.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
-                       block.match(/title=["']([^"']+)["']/i) ||
-                       block.match(/alt=["']([^"']+)["']/i);
-      var t = titleMatch ? stripHtml(titleMatch[1]) : "";
-      if (!t) {
-        var pm = href.match(/vid=([^&#]+)/);
-        t = pm ? pm[1] : "";
+      var fullUrl = decodeHtml(m[1]);
+      var vid = m[2];
+      var linkTitle = decodeHtml(m[3]);
+      if (seen[vid]) continue;
+      seen[vid] = 1;
+      var absolute = fullUrl.indexOf("http") === 0 ? fullUrl : BASE + fullUrl;
+      results.push({ url: absolute, title: linkTitle, vid: vid });
+    }
+    // Fallback: match without title attribute
+    if (!results.length) {
+      var re2 = /<a[^>]*href=["']([^"']*\/video\.php\?vid=([^"'&]+))["'][^>]*>/gi;
+      while ((m = re2.exec(html)) !== null) {
+        var fullUrl2 = decodeHtml(m[1]);
+        var vid2 = m[2];
+        if (seen[vid2]) continue;
+        seen[vid2] = 1;
+        var absolute2 = fullUrl2.indexOf("http") === 0 ? fullUrl2 : BASE + fullUrl2;
+        results.push({ url: absolute2, title: vid2, vid: vid2 });
       }
-      if (t) results.push({ url: absolute, title: t });
     }
     console.log("[Laroza] Search results:", results.length);
     return results;
@@ -129,20 +136,12 @@ function chooseResult(results, titles) {
   return bestScore >= 0.3 ? best : null;
 }
 
-function findEmbedUrl(videoHtml) {
-  var m = videoHtml.match(/href=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
-  if (m) {
-    var u = decodeHtml(m[1]);
-    return u.indexOf("http") === 0 ? u : BASE + u;
-  }
-  m = videoHtml.match(/src=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
-  if (m) {
-    var u2 = decodeHtml(m[1]);
-    return u2.indexOf("http") === 0 ? u2 : BASE + u2;
-  }
-  return null;
+// === EMBED URL: constructed directly from vid ===
+function buildEmbedUrl(vid) {
+  return BASE + "/embed.php?vid=" + vid;
 }
 
+// === OKHD iframe from embed page ===
 function findOkhdIframe(embedHtml) {
   var m = embedHtml.match(/<iframe[^>]*src=["']([^"']*okhd\.[^"']+)["']/i);
   if (m) {
@@ -155,6 +154,7 @@ function findOkhdIframe(embedHtml) {
   return null;
 }
 
+// === Dean Edwards Packer unpacker ===
 function unpackEval(html) {
   var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
@@ -177,7 +177,7 @@ function extractStreamsFromOkhd(okhdHtml) {
   var seen = {};
   var unpacked = unpackEval(okhdHtml);
   var search = unpacked || okhdHtml;
-  console.log("[Laroza] unpacked:", unpacked ? "yes" : "no");
+  console.log("[Laroza] unpacked:", unpacked ? "yes (" + search.length + " chars)" : "no");
 
   var re = /https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
   var m;
@@ -222,42 +222,39 @@ function makeStream(url, label, referer) {
   };
 }
 
-function resolveVideoPage(videoUrl) {
-  return fetchText(videoUrl, BASE + "/").then(function(videoHtml) {
-    var embedUrl = findEmbedUrl(videoHtml);
-    console.log("[Laroza] embed:", embedUrl || "NOT FOUND");
-    if (!embedUrl) return [];
-    return fetchText(embedUrl, videoUrl).then(function(embedHtml) {
-      var okhdUrl = findOkhdIframe(embedHtml);
-      console.log("[Laroza] okhd iframe:", okhdUrl || "NOT FOUND");
-      if (!okhdUrl) return [];
-      return fetchText(okhdUrl, embedUrl).then(function(okhdHtml) {
-        var directUrls = extractStreamsFromOkhd(okhdHtml);
-        if (directUrls.length) {
-          return directUrls.map(function(u, i) {
-            return makeStream(u, "Server " + (i + 1), embedUrl);
-          });
-        }
-        console.log("[Laroza] No direct URL — returning embed as iframe");
-        return [{
-          name: "Laroza",
-          title: "Laroza (Embed)",
-          url: okhdUrl,
-          quality: "Auto",
-          type: "iframe",
-          referer: embedUrl
-        }];
-      }).catch(function(err) {
-        console.log("[Laroza] okhd fetch failed:", err.message);
-        return [{
-          name: "Laroza",
-          title: "Laroza (Embed)",
-          url: okhdUrl,
-          quality: "Auto",
-          type: "iframe",
-          referer: embedUrl
-        }];
-      });
+function resolveVid(vid) {
+  var embedUrl = buildEmbedUrl(vid);
+  console.log("[Laroza] embed:", embedUrl);
+  return fetchText(embedUrl, BASE + "/").then(function(embedHtml) {
+    var okhdUrl = findOkhdIframe(embedHtml);
+    console.log("[Laroza] okhd iframe:", okhdUrl || "NOT FOUND");
+    if (!okhdUrl) return [];
+    return fetchText(okhdUrl, embedUrl).then(function(okhdHtml) {
+      var directUrls = extractStreamsFromOkhd(okhdHtml);
+      if (directUrls.length) {
+        return directUrls.map(function(u, i) {
+          return makeStream(u, "Server " + (i + 1), embedUrl);
+        });
+      }
+      console.log("[Laroza] No direct URL — returning embed fallback");
+      return [{
+        name: "Laroza",
+        title: "Laroza (Embed)",
+        url: okhdUrl,
+        quality: "Auto",
+        type: "iframe",
+        referer: embedUrl
+      }];
+    }).catch(function(err) {
+      console.log("[Laroza] okhd failed:", err.message);
+      return [{
+        name: "Laroza",
+        title: "Laroza (Embed)",
+        url: okhdUrl,
+        quality: "Auto",
+        type: "iframe",
+        referer: embedUrl
+      }];
     });
   });
 }
@@ -271,14 +268,14 @@ function getMovieStreams(tmdbId) {
       var seen = {};
       groups.forEach(function(g) {
         g.forEach(function(r) {
-          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+          if (!seen[r.vid]) { seen[r.vid] = 1; all.push(r); }
         });
       });
       console.log("[Laroza] Unique movie candidates:", all.length);
       if (!all.length) return [];
       var best = chooseResult(all, meta.titles);
       if (!best) return [];
-      return resolveVideoPage(best.url);
+      return resolveVid(best.vid);
     });
   }).catch(function(err) {
     console.log("[Laroza] Movie error:", err.message);
@@ -303,7 +300,7 @@ function getTvStreams(tmdbId, season, episode) {
       var seen = {};
       groups.forEach(function(g) {
         g.forEach(function(r) {
-          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+          if (!seen[r.vid]) { seen[r.vid] = 1; all.push(r); }
         });
       });
       console.log("[Laroza] Unique TV candidates:", all.length);
@@ -318,7 +315,7 @@ function getTvStreams(tmdbId, season, episode) {
       if (!pool.length) return [];
       var best = chooseResult(pool, meta.titles);
       if (!best) return [];
-      return resolveVideoPage(best.url);
+      return resolveVid(best.vid);
     });
   }).catch(function(err) {
     console.log("[Laroza] TV error:", err.message);
