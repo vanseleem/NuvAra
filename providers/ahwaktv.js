@@ -56,7 +56,16 @@ function tmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// === FIX 1: use keywords= not q=
+// === URL normalizer: handles both relative and absolute hrefs ===
+function normalizeUrl(raw) {
+  let u = String(raw || "").trim();
+  if (u.startsWith("//")) return "https:" + u;
+  if (u.startsWith("http")) return u;
+  if (u.startsWith("/")) return DOMAIN + u;
+  return DOMAIN + "/" + u;
+}
+
+// Search — uses keywords= AND handles absolute URLs
 function searchSite(query) {
   return __async(this, null, function* () {
     const url = `${DOMAIN}/search.php?keywords=${encodeURIComponent(query)}`;
@@ -64,20 +73,22 @@ function searchSite(query) {
     const html = yield get(url);
     const results = [];
 
-    const re1 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
+    // Primary: any href containing watch.php?vid=, with a title
+    const re1 = /<a[^>]*href="([^"]*\/watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
     let m;
     while ((m = re1.exec(html)) !== null) {
-      const watchUrl = `${DOMAIN}/${m[1]}`;
+      const watchUrl = normalizeUrl(m[1]);
       const title = decodeHtml(m[2]);
       if (!results.find(r => r.url === watchUrl)) {
         results.push({ url: watchUrl, title });
       }
     }
 
+    // Fallback: any watch.php?vid= link without title
     if (!results.length) {
-      const re2 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"/gi;
+      const re2 = /<a[^>]*href="([^"]*\/watch\.php\?vid=[A-Za-z0-9]+)"/gi;
       while ((m = re2.exec(html)) !== null) {
-        const watchUrl = `${DOMAIN}/${m[1]}`;
+        const watchUrl = normalizeUrl(m[1]);
         if (!results.find(r => r.url === watchUrl)) {
           results.push({ url: watchUrl, title: "" });
         }
@@ -90,16 +101,15 @@ function searchSite(query) {
 }
 
 function extractSeeUrl(html) {
-  const m = html.match(/https?:\/\/yam\.ahwaktv\.net\/see\.php\?vid=([A-Za-z0-9]+)/);
+  const m = html.match(/https?:\/\/[a-z0-9.-]*\/see\.php\?vid=[A-Za-z0-9]+/i);
   if (m) return m[0];
-  const m2 = html.match(/['"](\/see\.php\?vid=[A-Za-z0-9]+)['"]/);
-  if (m2) return DOMAIN + m2[1];
-  const m3 = html.match(/['"](see\.php\?vid=[A-Za-z0-9]+)['"]/);
-  if (m3) return DOMAIN + "/" + m3[1];
+  const m2 = html.match(/['"]((?:https?:)?\/\/[^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
+  if (m2) return normalizeUrl(m2[1]);
+  const m3 = html.match(/['"]([^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
+  if (m3) return normalizeUrl(m3[1]);
   return null;
 }
 
-// === FIX 2: extract iframes from see.php page ===
 function extractIframes(html) {
   const streams = [];
   const seen = new Set();
@@ -109,7 +119,6 @@ function extractIframes(html) {
     let u = decodeHtml(m[1]);
     if (u.startsWith("//")) u = "https:" + u;
     if (!u.startsWith("http")) continue;
-    // skip ads/tracking
     if (/googletagmanager|google\.|facebook|histats|pamphiltre|cloudflare|adcash|monetag|propeller|popads/i.test(u)) continue;
     if (seen.has(u)) continue;
     seen.add(u);
@@ -148,7 +157,6 @@ function makeStream(url, label, referer) {
   };
 }
 
-// === FIX 3: fetch see.php, extract iframes, return them ===
 function resolveSee(seeUrl, referer) {
   console.log("[AhwakTV] see.php:", seeUrl);
   return __async(this, null, function* () {
@@ -164,17 +172,16 @@ function resolveSee(seeUrl, referer) {
   });
 }
 
-// Extract episode list from a series page
 function extractEpisodeList(html) {
   const episodes = [];
-  const re2 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
+  const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
   let m;
-  while ((m = re2.exec(html)) !== null) {
+  while ((m = re.exec(html)) !== null) {
+    const url = normalizeUrl(m[1]);
     const title = decodeHtml(m[2]);
     const numMatch = title.match(/الحلقة\s+(\d+)/);
     if (!numMatch) continue;
     const num = parseInt(numMatch[1], 10);
-    const url = `${DOMAIN}/${m[1]}`;
     if (!episodes.find(e => e.num === num)) {
       episodes.push({ num, url });
     }
@@ -224,37 +231,28 @@ function getStreams(tmdbId, mediaType, season, episode) {
           for (const result of results.slice(0, 3)) {
             try {
               const html = yield get(result.url);
-
               const titleEpMatch = result.title.match(/الحلقة\s+(\d+)/);
+              let targetUrl = null;
+
               if (titleEpMatch && parseInt(titleEpMatch[1], 10) === wantedEp) {
-                const seeUrl = extractSeeUrl(html);
-                if (seeUrl) {
-                  const resolved = yield resolveSee(seeUrl, result.url);
-                  for (const s of resolved) {
-                    if (seen.has(s.url)) continue;
-                    seen.add(s.url);
-                    streams.push(s);
-                  }
-                  if (streams.length) break;
-                }
+                targetUrl = result.url;
+              } else {
+                const epList = extractEpisodeList(html);
+                const epEntry = epList.find(e => e.num === wantedEp);
+                if (epEntry) targetUrl = epEntry.url;
               }
 
-              const epList = extractEpisodeList(html);
-              const epEntry = epList.find(e => e.num === wantedEp);
-              if (epEntry) {
-                const epHtml = epEntry.url === result.url ? html : yield get(epEntry.url);
-                const seeUrl = extractSeeUrl(epHtml);
-                if (seeUrl) {
-                  const resolved = yield resolveSee(seeUrl, epEntry.url);
-                  for (const s of resolved) {
-                    if (seen.has(s.url)) continue;
-                    seen.add(s.url);
-                    streams.push(s);
-                  }
-                  if (streams.length) break;
-                }
-              }
+              if (!targetUrl) continue;
 
+              const epHtml = targetUrl === result.url ? html : yield get(targetUrl);
+              const seeUrl = extractSeeUrl(epHtml);
+              if (!seeUrl) continue;
+              const resolved = yield resolveSee(seeUrl, targetUrl);
+              for (const s of resolved) {
+                if (seen.has(s.url)) continue;
+                seen.add(s.url);
+                streams.push(s);
+              }
               if (streams.length) break;
             } catch (e) {
               console.log("[AhwakTV] TV page error:", e.message);
