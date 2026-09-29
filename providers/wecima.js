@@ -1,97 +1,75 @@
-var BASE = "https://wecima.ac";
-var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36";
+var BASE = "https://wecima.loan";
+var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-// Cloudflare cookie cache
-var _cfCookie = null;
-
-function encodeUrl(u) {
-  return String(u).replace(/[^\x00-\x7F]/g, function(c) {
-    return encodeURIComponent(c);
-  });
-}
-
 function fetchText(url, referer) {
-  url = encodeUrl(url);
-  var headers = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
-  };
-  if (referer) headers["Referer"] = encodeUrl(referer);
-  if (_cfCookie) headers["Cookie"] = _cfCookie;
-
+  url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  var headers = { "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" };
+  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
   return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
-    // capture cf_clearance if present
-    try {
-      var sc = r.headers.get("set-cookie");
-      if (sc) {
-        var m = sc.match(/cf_clearance=([^;]+)/);
-        if (m) _cfCookie = "cf_clearance=" + m[1];
-      }
-    } catch (e) {}
     if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.text();
-  });
-}
-
-function fetchPost(url, body, referer) {
-  var headers = {
-    "User-Agent": UA,
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-    "X-Requested-With": "XMLHttpRequest",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-  };
-  if (referer) headers["Referer"] = encodeUrl(referer);
-  if (_cfCookie) headers["Cookie"] = _cfCookie;
-
-  return fetch(encodeUrl(url), {
-    method: "POST",
-    headers: headers,
-    body: body,
-    redirect: "follow"
-  }).then(function(r) {
-    try {
-      var sc = r.headers.get("set-cookie");
-      if (sc) {
-        var m = sc.match(/cf_clearance=([^;]+)/);
-        if (m) _cfCookie = "cf_clearance=" + m[1];
-      }
-    } catch (e) {}
     return r.text();
   });
 }
 
 function decodeHtml(str) {
   return String(str || "")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'").replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function stripHtml(str) {
+  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTitle(str) {
+  return String(str || "").toLowerCase().replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function similarity(a, b) {
+  a = normalizeTitle(a); b = normalizeTitle(b);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.indexOf(b) !== -1 || b.indexOf(a) !== -1) return 0.85;
+  var aa = a.split(" "), bb = b.split(" "), setB = {};
+  bb.forEach(function(x) { setB[x] = 1; });
+  var c = 0; aa.forEach(function(x) { if (setB[x]) c++; });
+  return c / Math.max(aa.length, bb.length);
+}
+
+// Base64 decoder (Hermes has no atob)
+function b64decode(input) {
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  var str = String(input).replace(/[^A-Za-z0-9+/=]/g, "");
+  var out = "";
+  for (var i = 0; i < str.length; i += 4) {
+    var c1 = chars.indexOf(str[i]);
+    var c2 = chars.indexOf(str[i + 1]);
+    var c3 = chars.indexOf(str[i + 2]);
+    var c4 = chars.indexOf(str[i + 3]);
+    var b1 = (c1 << 2) | (c2 >> 4);
+    var b2 = ((c2 & 15) << 4) | (c3 >> 2);
+    var b3 = ((c3 & 3) << 6) | c4;
+    out += String.fromCharCode(b1);
+    if (c3 !== 64) out += String.fromCharCode(b2);
+    if (c4 !== 64) out += String.fromCharCode(b3);
+  }
+  try { return decodeURIComponent(escape(out)); } catch (_) { return out; }
 }
 
 function getTmdbTitles(tmdbId, mediaType) {
   var type = mediaType === "tv" ? "tv" : "movie";
   var langs = ["ar", "en"];
   var titles = [];
-
   return langs.reduce(function(chain, lang) {
     return chain.then(function() {
-      var apiUrl = "https://api.themoviedb.org/3/" + type + "/" +
-        encodeURIComponent(tmdbId) +
-        "?api_key=" + TMDB_API_KEY + "&language=" + lang;
-      return fetch(apiUrl)
+      return fetch("https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) + "?api_key=" + TMDB_API_KEY + "&language=" + lang)
         .then(function(r) { return r.json(); })
-        .then(function(data) {
-          var t = type === "movie"
-            ? (data.title || data.original_title)
-            : (data.name || data.original_name);
+        .then(function(d) {
+          var t = type === "movie" ? (d.title || d.original_title) : (d.name || d.original_name);
           if (t && titles.indexOf(t) === -1) titles.push(t);
-        })
-        .catch(function() {});
+        }).catch(function() {});
     });
   }, Promise.resolve()).then(function() {
     console.log("[WeCima] TMDB titles:", titles.join(" | "));
@@ -99,208 +77,180 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-function searchWeCima(query) {
-  var url = BASE + "/search";
-  var body = "q=" + encodeURIComponent(query);
-  console.log("[WeCima] Search POST:", url, "q=" + query);
-
-  return fetchPost(url, body, BASE + "/").then(function(text) {
+// Search via /search/?q= (returns 60 Arabic links)
+function searchWeCima(title) {
+  var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  var url = BASE + "/search/?q=" + encodeURIComponent(cleanTitle);
+  console.log("[WeCima] Search:", cleanTitle);
+  return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
-    try {
-      var data = JSON.parse(text);
-      if (data && data.results) {
-        data.results.forEach(function(item) {
-          if (item.istv === 2) return; // skip
-          var isTv = item.istv !== 0;
-          var prefix = isTv ? "/series/" : "/watch/";
-          var slug = item.slug || "";
-          if (!slug) return;
-          var itemUrl = slug.startsWith("http")
-            ? slug
-            : BASE + prefix + encodeURIComponent(slug);
-          results.push({
-            title: item.title || "",
-            url: itemUrl,
-            isTv: isTv,
-            year: item.year
-          });
-        });
-      }
-    } catch (e) {
-      console.log("[WeCima] search parse error:", e.message);
+    var seen = {};
+    var re = /href=["'](https?:\/\/wecima\.loan\/[^"']+)["']/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var link = m[1];
+      // Skip category/tag/page links
+      if (/\/category\/|\/tag\/|\/page\/|filtering|\/movies\/$|\/series\/$|\/episodes\/$|\/production\/|feed|#|javascript/.test(link)) continue;
+      if (seen[link]) continue;
+      seen[link] = 1;
+      var path = link.replace(/^https?:\/\/[^\/]+\//, "").replace(/\/$/, "");
+      var last = path.split("/").pop();
+      var t = "";
+      try { t = decodeURIComponent(last).replace(/[-_]+/g, " "); } catch (e) { t = last; }
+      if (t) results.push({ url: link, title: t });
     }
     console.log("[WeCima] Search results:", results.length);
     return results;
   });
 }
 
-function base64Decode(str) {
-  // Try global atob first (available in most JS runtimes)
-  try {
-    if (typeof atob === "function") return atob(str);
-  } catch (e) {}
-  // Fallback
-  try {
-    if (typeof Buffer !== "undefined") {
-      return Buffer.from(str, "base64").toString("utf-8");
-    }
-  } catch (e) {}
-  return null;
+function chooseResult(results, titles) {
+  var best = null, bestScore = 0;
+  results.forEach(function(r) {
+    var s = 0;
+    titles.forEach(function(t) {
+      var sc = similarity(r.title, t);
+      if (sc > s) s = sc;
+    });
+    if (s > bestScore) { bestScore = s; best = r; }
+  });
+  if (best) console.log("[WeCima] Best:", best.title, "score:", bestScore.toFixed(3));
+  return bestScore >= 0.3 ? best : null;
 }
 
+// Decode WeCima's data-url base64 (they may strip the leading "aHR0c")
 function decodeWecimaUrl(encoded) {
   try {
     if (!encoded) return null;
     var cleaned = String(encoded).replace(/\+/g, "").trim();
-    var final = cleaned.indexOf("aHR0c") === 0 ? cleaned : "aHR0c" + cleaned;
-    var decoded = base64Decode(final);
-    if (!decoded) return null;
+    var final_ = cleaned.indexOf("aHR0c") === 0 ? cleaned : "aHR0c" + cleaned;
+    var decoded = b64decode(final_);
+    if (!decoded || decoded.indexOf("http") !== 0) return null;
     return decoded;
   } catch (e) {
     return null;
   }
 }
 
-function extractStreamsFromEpisodePage(html) {
-  var streams = [];
-  var seen = new Set();
-
-  // Look for data-url on server buttons
-  var re = /data-url\s*=\s*["']([^"']+)["']/gi;
-  var m;
-  var idx = 0;
-
-  while ((m = re.exec(html)) !== null) {
-    var decoded = decodeWecimaUrl(m[1]);
-    if (decoded && decoded.indexOf("http") === 0 && !seen.has(decoded)) {
-      seen.add(decoded);
-      idx++;
-      streams.push({
-        name: "WeCima",
-        title: "WeCima Server " + idx,
-        url: decoded,
-        quality: "Unknown",
-        referer: BASE + "/"
-      });
-    }
-  }
-
-  // Also try data-href (download buttons)
-  var re2 = /data-href\s*=\s*["']([^"']+)["']/gi;
-  while ((m = re2.exec(html)) !== null) {
-    var dec2 = decodeWecimaUrl(m[1]);
-    if (dec2 && dec2.indexOf("http") === 0 && !seen.has(dec2)) {
-      seen.add(dec2);
-      idx++;
-      streams.push({
-        name: "WeCima",
-        title: "WeCima Download " + idx,
-        url: dec2,
-        quality: "Unknown",
-        referer: BASE + "/"
-      });
-    }
-  }
-
-  return streams;
+function qualityFromUrl(url) {
+  var s = String(url).toLowerCase();
+  if (/2160|4k/.test(s)) return "4K";
+  if (/1080/.test(s)) return "1080p";
+  if (/720/.test(s)) return "720p";
+  if (/480/.test(s)) return "480p";
+  return "Auto";
 }
 
-function getMovieStreams(tmdbId) {
-  return getTmdbTitles(tmdbId, "movie").then(function(titles) {
-    if (!titles.length) return [];
-    return searchWeCima(titles[0]).then(function(results) {
-      if (!results.length) {
-        console.log("[WeCima] no movie results");
-        return [];
-      }
-      // Take first result
-      var best = results[0];
-      console.log("[WeCima] selected:", best.title, best.url);
+function makeStream(url, label) {
+  if (url.indexOf("http://") === 0) url = "https://" + url.slice(7);
+  return {
+    name: "⚜️ WeCima",
+    title: label ? "⚜️ WeCima \u2022 " + label : "⚜️ WeCima",
+    url: url,
+    quality: qualityFromUrl(url),
+    type: /\.m3u8/i.test(url) ? "hls" : "iframe",
+    referer: BASE + "/"
+  };
+}
 
-      // If it's already a /watch/ URL, extract streams
-      if (best.url.indexOf("/watch/") !== -1) {
-        return fetchText(best.url, BASE + "/").then(function(html) {
-          return extractStreamsFromEpisodePage(html);
-        });
-      }
+function resolveDetail(detailUrl) {
+  console.log("[WeCima] detail:", detailUrl);
+  return fetchText(detailUrl, BASE + "/").then(function(html) {
+    var streams = [];
+    var seen = {};
 
-      // Otherwise, fetch the page and look for a watch link
-      return fetchText(best.url, BASE + "/").then(function(html) {
-        var m = html.match(/href=["']([^"']*\/watch\/[^"']+)["']/i);
-        if (!m) {
-          console.log("[WeCima] no watch link on movie page");
-          return [];
-        }
-        var watchUrl = m[1].indexOf("http") === 0 ? m[1] : BASE + m[1];
-        return fetchText(watchUrl, best.url).then(function(whtml) {
-          return extractStreamsFromEpisodePage(whtml);
-        });
-      });
+    // Pattern 1: WatchServersList with <btn data-url="...">
+    var re = /data-url=["']([^"']+)["']/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var enc = decodeHtml(m[1]);
+      var decoded = decodeWecimaUrl(enc);
+      if (decoded && !seen[decoded]) {
+        seen[decoded] = 1;
+        streams.push(decoded);
+      }
+    }
+
+    // Pattern 2: Direct iframes
+    var re2 = /<iframe[^>]*src=["']([^"']+)["']/gi;
+    while ((m = re2.exec(html)) !== null) {
+      var u = decodeHtml(m[1]);
+      if (u.indexOf("//") === 0) u = "https:" + u;
+      if (u.indexOf("http") !== 0) continue;
+      if (seen[u]) continue;
+      seen[u] = 1;
+      streams.push(u);
+    }
+
+    console.log("[WeCima] decoded streams:", streams.length);
+    return streams.map(function(u, i) {
+      var host = "";
+      try { host = u.split("/")[2]; } catch (e) {}
+      return makeStream(u, host || ("Server " + (i + 1)));
     });
   });
 }
 
-function getTvStreams(tmdbId, season, episode) {
-  return getTmdbTitles(tmdbId, "tv").then(function(titles) {
-    if (!titles.length) return [];
-    return searchWeCima(titles[0]).then(function(results) {
-      if (!results.length) {
-        console.log("[WeCima] no TV results");
-        return [];
-      }
-      // Pick first TV result
-      var best = results.find(function(r) { return r.isTv; }) || results[0];
-      console.log("[WeCima] selected TV:", best.title, best.url);
-
-      // Fetch series page, find episode link matching season/episode
-      return fetchText(best.url, BASE + "/").then(function(html) {
-        // Look for links with "الحلقة" or "Episode"
-        var epLinks = [];
-        var re = /href=["']([^"']*\/watch\/[^"']+)["']/gi;
-        var m;
-        while ((m = re.exec(html)) !== null) {
-          var u = decodeHtml(m[1]);
-          if (epLinks.indexOf(u) === -1) epLinks.push(u);
-        }
-
-        if (!epLinks.length) {
-          console.log("[WeCima] no episode links found");
-          return [];
-        }
-
-        // Try to match episode number
-        var wanted = Number(episode) || 1;
-        var selected = epLinks.filter(function(u) {
-          var dec = "";
-          try { dec = decodeURIComponent(u); } catch (e) { dec = u; }
-          var mm = dec.match(/الحلق[ةه][^0-9]*([0-9]+)/i) ||
-                   u.match(/-([0-9]+)(?:[/?#]|$)/);
-          return mm && Number(mm[1]) === wanted;
-        });
-
-        var target = selected.length ? selected[0] : epLinks[Math.min(wanted - 1, epLinks.length - 1)];
-        if (!target) return [];
-
-        var watchUrl = target.indexOf("http") === 0 ? target : BASE + target;
-        console.log("[WeCima] episode page:", watchUrl);
-
-        return fetchText(watchUrl, best.url).then(function(ehtml) {
-          return extractStreamsFromEpisodePage(ehtml);
+function getMovieStreams(tmdbId) {
+  return getTmdbTitles(tmdbId, "movie").then(function(titles) {
+    return Promise.all(titles.map(function(t) {
+      return searchWeCima(t).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [], seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
         });
       });
+      console.log("[WeCima] Unique candidates:", all.length);
+      if (!all.length) return [];
+      var best = chooseResult(all, titles);
+      if (!best) return [];
+      return resolveDetail(best.url);
     });
+  }).catch(function(err) {
+    console.log("[WeCima] Movie error:", err.message);
+    return [];
+  });
+}
+
+function getTvStreams(tmdbId, season, episode) {
+  var wanted = Number(episode) || 1;
+  return getTmdbTitles(tmdbId, "tv").then(function(titles) {
+    var searches = [];
+    titles.forEach(function(t) {
+      searches.push(t + " الحلقة " + wanted);
+      searches.push(t);
+    });
+    return Promise.all(searches.map(function(q) {
+      return searchWeCima(q).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [], seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+        });
+      });
+      console.log("[WeCima] TV candidates:", all.length);
+      var withEp = all.filter(function(r) {
+        return new RegExp("(?:الحلق[ةه]\\s*" + wanted + "\\b|\\b" + wanted + "\\b)", "i").test(r.title);
+      });
+      var pool = withEp.length ? withEp : all;
+      if (!pool.length) return [];
+      var best = chooseResult(pool, titles);
+      if (!best) return [];
+      return resolveDetail(best.url);
+    });
+  }).catch(function(err) {
+    console.log("[WeCima] TV error:", err.message);
+    return [];
   });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log("[WeCima] getStreams:", tmdbId, mediaType, season, episode);
-  var fn = mediaType === "tv"
-    ? getTvStreams(tmdbId, season, episode)
-    : getMovieStreams(tmdbId);
-  return fn.catch(function(err) {
-    console.log("[WeCima] error:", err.message);
-    return [];
-  });
+  if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
+  return getMovieStreams(tmdbId);
 }
 
 module.exports = { getStreams: getStreams };
