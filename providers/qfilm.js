@@ -215,8 +215,8 @@ function makeStream(url, label, referer) {
   }
 
   return {
-    name: "⚜️ QFilm",
-    title: label ? "⚜️ QFilm \u2022 " + label : "⚜️ QFilm",
+    name: "🧿 QFilm",
+    title: label ? "🧿 QFilm \u2022 " + label : "🧿 QFilm",
     url: url,
     quality: qualityFromUrl(url),
     referer: streamReferer,
@@ -245,8 +245,8 @@ function resolveVid(vid) {
       }
       console.log("[QFilm] No direct URL — returning embed fallback");
       return [{
-        name: "⚜️ QFilm",
-        title: "⚜️ QFilm (Embed)",
+        name: "🧿 QFilm",
+        title: "🧿 QFilm (Embed)",
         url: playerUrl,
         quality: "Auto",
         type: "iframe",
@@ -255,8 +255,8 @@ function resolveVid(vid) {
     }).catch(function(err) {
       console.log("[QFilm] player failed:", err.message);
       return [{
-        name: "⚜️ QFilm",
-        title: "⚜️ QFilm (Embed)",
+        name: "🧿 QFilm",
+        title: "🧿 QFilm (Embed)",
         url: playerUrl,
         quality: "Auto",
         type: "iframe",
