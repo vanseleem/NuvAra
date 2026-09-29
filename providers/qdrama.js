@@ -220,8 +220,8 @@ function getStreams(tmdbId, mediaType, season, episode) {
           return getStreamsFromWatchPage(c.url).then(function(urls) {
             return urls.map(function(u, i) {
               return {
-                name: "🧿 QDrama",
-                title: "🧿 QDrama • Auto",
+                name: "⚜️ QDrama",
+                title: "⚜️ QDrama • Auto",
                 url: u,
                 quality: "Auto",
                 referer: BASE + "/"
