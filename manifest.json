@@ -113,6 +113,20 @@
   "supportsExternalPlayer": true
 },
     {
+  "id": "dramacafe",
+  "name": "DramaCafe",
+  "description": "Arabic movies and series from DramaCafe",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/dramacafe.js",
+  "enabled": true,
+  "formats": ["m3u8", "mp4"],
+  "contentLanguage": ["ar"],
+  "limited": false,
+  "supportsExternalPlayer": true
+},
+    {
       "id": "akwam",
       "name": "Akwam",
       "description": "Arabic movie and TV streaming provider",
