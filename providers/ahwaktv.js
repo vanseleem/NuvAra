@@ -60,85 +60,90 @@ function tmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// Extract all watch.php?vid= links from any HTML page
-function extractWatchLinks(html) {
-  const results = [];
-  // Pattern 1: href="watch.php?vid=X" title="Y"
-  const re1 = /href="([^"]*watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
-  let m;
-  while ((m = re1.exec(html)) !== null) {
-    let url = decodeHtml(m[1]);
-    const title = decodeHtml(m[2]);
-    if (!url.startsWith("http")) url = DOMAIN + "/" + url.replace(/^\//, "");
-    if (!results.find(r => r.url === url)) results.push({ url, title });
-  }
-  // Pattern 2: href="watch.php?vid=X" anywhere — no title attr (fallback)
-  if (!results.length) {
-    const re2 = /href="([^"]*watch\.php\?vid=[A-Za-z0-9]+)"/gi;
-    while ((m = re2.exec(html)) !== null) {
-      let url = decodeHtml(m[1]);
-      if (!url.startsWith("http")) url = DOMAIN + "/" + url.replace(/^\//, "");
-      if (!results.find(r => r.url === url)) results.push({ url, title: "" });
-    }
-  }
-  return results;
-}
-
-// Search and return watch links
+// Search returns watch.php links with episode title in the title attribute
+// Pattern from real HTML: href="watch.php?vid=Ebbc5101f" title="مسلسل ... الحلقة 4"
 function searchSite(query) {
   return __async(this, null, function* () {
     const url = `${DOMAIN}/search.php?q=${encodeURIComponent(query)}`;
-    console.log("[AhwakTV] Search URL:", url);
+    console.log("[AhwakTV] Searching:", url);
     const html = yield get(url);
-    return extractWatchLinks(html);
-  });
-}
+    const results = [];
 
-// Get see.php?vid= URL from a watch.php page
-function extractSeeUrl(html, watchUrl) {
-  // Confirmed pattern: see.php?vid=XXXXX appears multiple times
-  const m = html.match(/(?:https?:\/\/yam\.ahwaktv\.net\/)?see\.php\?vid=([A-Za-z0-9]+)/);
-  if (!m) return null;
-  return `${DOMAIN}/see.php?vid=${m[1]}`;
-}
-
-// Get serie ID from a watch.php page
-function extractSerieId(html) {
-  const m = html.match(/view-serie\.php\?id=(\d+)/);
-  return m ? m[1] : null;
-}
-
-// Get episode watch URL from serie page by episode number
-function getEpisodeUrl(serieId, wantedEp) {
-  return __async(this, null, function* () {
-    const url = `${DOMAIN}/view-serie.php?id=${serieId}`;
-    console.log("[AhwakTV] Serie page:", url);
-    const html = yield get(url);
-
-    // Links + titles from serie page
-    const links = extractWatchLinks(html);
-    console.log("[AhwakTV] Serie links found:", links.length);
-
-    for (const link of links) {
-      // Match الحلقة N in title
-      const epMatch = link.title.match(/الحلقة\s+(\d+)/);
-      if (epMatch && parseInt(epMatch[1], 10) === wantedEp) {
-        console.log("[AhwakTV] Found ep", wantedEp, "at", link.url);
-        return link.url;
+    // Primary pattern: title attr present
+    const re1 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
+    let m;
+    while ((m = re1.exec(html)) !== null) {
+      const watchUrl = `${DOMAIN}/${m[1]}`;
+      const title = decodeHtml(m[2]);
+      if (!results.find(r => r.url === watchUrl)) {
+        results.push({ url: watchUrl, title });
       }
     }
 
-    // Fallback: if titles are empty, try ordering (ep N = index N-1)
-    if (links.length >= wantedEp) {
-      console.log("[AhwakTV] Fallback: using index", wantedEp - 1);
-      return links[wantedEp - 1].url;
+    // Fallback: no title attr, grab any watch link
+    if (!results.length) {
+      const re2 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"/gi;
+      while ((m = re2.exec(html)) !== null) {
+        const watchUrl = `${DOMAIN}/${m[1]}`;
+        if (!results.find(r => r.url === watchUrl)) {
+          results.push({ url: watchUrl, title: "" });
+        }
+      }
     }
 
-    return null;
+    console.log("[AhwakTV] Found", results.length, "results");
+    return results;
   });
 }
 
-function makeStream(seeUrl, label, watchUrl) {
+// Extract see.php URL from a watch page
+// Confirmed: appears as full URL https://yam.ahwaktv.net/see.php?vid=Ebbc5101f
+function extractSeeUrl(html) {
+  const m = html.match(/https?:\/\/yam\.ahwaktv\.net\/see\.php\?vid=([A-Za-z0-9]+)/);
+  if (m) return m[0];
+  // relative fallback
+  const m2 = html.match(/['"](\/see\.php\?vid=[A-Za-z0-9]+)['"]/);
+  if (m2) return DOMAIN + m2[1];
+  return null;
+}
+
+// Extract the episode list from a watch page
+// Pattern confirmed: [*N*حلقة](watch.php?vid=XXX title="...")
+// or: href="watch.php?vid=XXX" title="... الحلقة N ..."
+function extractEpisodeList(html) {
+  const episodes = [];
+
+  // Pattern 1: [*N*حلقة](watch.php?vid=XXX "title")  ← from serie episode grid
+  const re1 = /\[\*(\d+)\*[^\]]*\]\(([^)? ]+watch\.php\?vid=[A-Za-z0-9]+)[^)]*\)/gi;
+  let m;
+  while ((m = re1.exec(html)) !== null) {
+    const num = parseInt(m[1], 10);
+    let url = decodeHtml(m[2]);
+    if (!url.startsWith("http")) url = DOMAIN + "/" + url.replace(/^\//, "");
+    if (!episodes.find(e => e.num === num)) {
+      episodes.push({ num, url });
+    }
+  }
+
+  // Pattern 2: href="watch.php?vid=XXX" title="... الحلقة N ..."
+  if (!episodes.length) {
+    const re2 = /href="(watch\.php\?vid=[A-Za-z0-9]+)"[^>]*title="([^"]*)"/gi;
+    while ((m = re2.exec(html)) !== null) {
+      const title = decodeHtml(m[2]);
+      const numMatch = title.match(/الحلقة\s+(\d+)/);
+      if (!numMatch) continue;
+      const num = parseInt(numMatch[1], 10);
+      const url = `${DOMAIN}/${m[1]}`;
+      if (!episodes.find(e => e.num === num)) {
+        episodes.push({ num, url });
+      }
+    }
+  }
+
+  return episodes;
+}
+
+function makeStream(seeUrl, label, referer) {
   return {
     name: "🌙 AhwakTV",
     title: `🌙 AhwakTV • ${label}`,
@@ -146,7 +151,7 @@ function makeStream(seeUrl, label, watchUrl) {
     quality: "Auto",
     headers: {
       "User-Agent": USER_AGENT,
-      "Referer": watchUrl || (DOMAIN + "/")
+      "Referer": referer || (DOMAIN + "/")
     }
   };
 }
@@ -169,64 +174,76 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
     for (const title of titles) {
       try {
-        console.log("[AhwakTV] Searching:", title);
         const results = yield searchSite(title);
-        console.log("[AhwakTV] Results:", results.length);
         if (!results.length) continue;
 
         if (mediaType === "movie") {
-          // Each result is a direct episode/movie watch page
+          // Each search result IS the movie watch page — grab first valid one
           for (const result of results.slice(0, 3)) {
             try {
               const html = yield get(result.url);
-              const seeUrl = extractSeeUrl(html, result.url);
+              const seeUrl = extractSeeUrl(html);
               if (!seeUrl || seen.has(seeUrl)) continue;
               seen.add(seeUrl);
               streams.push(makeStream(seeUrl, "فيلم", result.url));
-              console.log("[AhwakTV] Movie stream:", seeUrl);
+              console.log("[AhwakTV] Movie:", seeUrl);
             } catch (e) {
-              console.log("[AhwakTV] Movie error:", e.message);
+              console.log("[AhwakTV] Movie page error:", e.message);
             }
           }
+
         } else {
-          // TV: find serie ID, then get correct episode
-          for (const result of results.slice(0, 5)) {
+          // TV: search returns individual episode pages
+          // Each watch page has the full episode list for the series
+          // Strategy: load first result, extract episode list, find wantedEp
+          for (const result of results.slice(0, 3)) {
             try {
               const html = yield get(result.url);
-              const serieId = extractSerieId(html);
-              if (!serieId) {
-                // This watch page itself might be the right episode
-                // Check title for episode number match
-                const epInTitle = result.title.match(/الحلقة\s+(\d+)/);
-                if (epInTitle && parseInt(epInTitle[1], 10) === wantedEp) {
-                  const seeUrl = extractSeeUrl(html, result.url);
-                  if (seeUrl && !seen.has(seeUrl)) {
-                    seen.add(seeUrl);
-                    streams.push(makeStream(seeUrl, `الحلقة ${wantedEp}`, result.url));
-                    console.log("[AhwakTV] TV direct stream:", seeUrl);
-                  }
+
+              // Check: does this page's title match wantedEp directly?
+              const titleEpMatch = result.title.match(/الحلقة\s+(\d+)/);
+              if (titleEpMatch && parseInt(titleEpMatch[1], 10) === wantedEp) {
+                // This IS the episode we want
+                const seeUrl = extractSeeUrl(html);
+                if (seeUrl && !seen.has(seeUrl)) {
+                  seen.add(seeUrl);
+                  streams.push(makeStream(seeUrl, `الحلقة ${wantedEp}`, result.url));
+                  console.log("[AhwakTV] TV direct hit ep", wantedEp, ":", seeUrl);
+                  break;
                 }
-                continue;
               }
-              console.log("[AhwakTV] Serie ID:", serieId);
-              const epUrl = yield getEpisodeUrl(serieId, wantedEp);
-              if (!epUrl) continue;
-              const epHtml = yield get(epUrl);
-              const seeUrl = extractSeeUrl(epHtml, epUrl);
-              if (!seeUrl || seen.has(seeUrl)) continue;
-              seen.add(seeUrl);
-              streams.push(makeStream(seeUrl, `الحلقة ${wantedEp}`, epUrl));
-              console.log("[AhwakTV] TV stream:", seeUrl);
-              break;
+
+              // Extract episode list from this page and find wantedEp
+              const epList = extractEpisodeList(html);
+              console.log("[AhwakTV] Episode list found:", epList.length, "eps");
+
+              const epEntry = epList.find(e => e.num === wantedEp);
+              if (epEntry) {
+                // Fetch that episode's watch page
+                const epHtml = epEntry.url === result.url
+                  ? html
+                  : yield get(epEntry.url);
+                const seeUrl = extractSeeUrl(epHtml);
+                if (seeUrl && !seen.has(seeUrl)) {
+                  seen.add(seeUrl);
+                  streams.push(makeStream(seeUrl, `الحلقة ${wantedEp}`, epEntry.url));
+                  console.log("[AhwakTV] TV from list ep", wantedEp, ":", seeUrl);
+                }
+                break;
+              }
+
+              // If episode list is available but wantedEp not in it → wrong series, skip
+              if (epList.length > 0) continue;
+
             } catch (e) {
-              console.log("[AhwakTV] TV error:", e.message);
+              console.log("[AhwakTV] TV page error:", e.message);
             }
           }
         }
 
         if (streams.length) break;
       } catch (e) {
-        console.log("[AhwakTV] Search error:", title, e.message);
+        console.log("[AhwakTV] Error:", title, e.message);
       }
     }
 
