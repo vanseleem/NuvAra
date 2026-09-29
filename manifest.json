@@ -22,25 +22,13 @@
       "description": "Netflix | Prime | Disney",
       "version": "1.0.0",
       "author": "Dustincos",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
+      "supportedTypes": ["movie", "tv"],
       "filename": "providers/netmirror.js",
       "enabled": true,
       "hasSettings": true,
-      "formats": [
-        "mp4",
-        "m3u8",
-        "mkv"
-      ],
+      "formats": ["mp4", "m3u8", "mkv"],
       "logo": "https://i.postimg.cc/L64M3bYV/netmirror.png",
-      "contentLanguage": [
-        "en",
-        "hi",
-        "ta",
-        "te"
-      ]
+      "contentLanguage": ["en", "hi", "ta", "te"]
     },
     {
       "id": "movix",
@@ -48,21 +36,12 @@
       "description": "Movies and TV series in English & French (dubbed/subtitled)",
       "version": "1.0.0",
       "author": "wooodyhood",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
+      "supportedTypes": ["movie", "tv"],
       "filename": "providers/movixFX.js",
       "enabled": true,
-      "formats": [
-        "mp4",
-        "m3u8"
-      ],
+      "formats": ["mp4", "m3u8"],
       "logo": "https://i.postimg.cc/XYrPQm87/movix.png",
-      "contentLanguage": [
-        "en",
-        "fr"
-      ]
+      "contentLanguage": ["en", "fr"]
     },
     {
       "id": "nuvio-movix",
@@ -92,6 +71,20 @@
       "supportsExternalPlayer": true
     },
     {
+      "id": "qdrama",
+      "name": "QDrama",
+      "description": "Arabic and international drama streaming",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/QDrama.js",
+      "enabled": true,
+      "formats": ["m3u8"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
       "id": "akwam",
       "name": "Akwam",
       "description": "Arabic movie and TV streaming provider",
@@ -104,20 +97,6 @@
       "contentLanguage": ["ar"],
       "limited": false,
       "supportsExternalPlayer": true
-    },
-    {
-  "id": "q-drama",
-  "name": "q-drama",
-  "description": "Arabic and international drama streaming",
-  "version": "1.0.0",
-  "author": "vanseleem",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "providers/QDrama.js",
-  "enabled": true,
-  "formats": ["m3u8"],
-  "contentLanguage": ["ar"],
-  "limited": false,
-  "supportsExternalPlayer": true
-}
+    }
   ]
 }
