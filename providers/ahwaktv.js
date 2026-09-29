@@ -68,7 +68,6 @@ function tmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// Search — NO filter here, just collect everything
 function searchSite(query) {
   return __async(this, null, function* () {
     const url = `${DOMAIN}/search.php?keywords=${encodeURIComponent(query)}`;
@@ -89,7 +88,6 @@ function searchSite(query) {
       results.push({ url: u, title: decodeHtml(m[3]), vid });
     }
 
-    // Fallback: no title attribute
     if (!results.length) {
       const re2 = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"/gi;
       while ((m = re2.exec(html)) !== null) {
@@ -108,11 +106,9 @@ function searchSite(query) {
   });
 }
 
-// Score and sort candidates by how well their title matches the query
 function scoreCandidates(results, query, mediaType, ep) {
   if (!results.length) return [];
   const nq = normalizeArabic(query);
-  // Strip "الحلقة N" from query
   const baseQuery = nq.replace(/الحلق[هة]\s*[0-9\u0660-\u0669]+/g, "").trim();
   const baseWords = baseQuery.split(/\s+/).filter(w => w.length >= 2);
 
@@ -120,10 +116,8 @@ function scoreCandidates(results, query, mediaType, ep) {
     const nt = normalizeArabic(r.title);
     let score = 0;
 
-    // Full query containment — biggest signal
     if (baseQuery && nt.indexOf(baseQuery) !== -1) score += 10;
 
-    // Per-word match
     let wordsHit = 0;
     for (const w of baseWords) {
       if (nt.indexOf(w) !== -1) wordsHit++;
@@ -133,17 +127,15 @@ function scoreCandidates(results, query, mediaType, ep) {
       score += Math.round(ratio * 8);
     }
 
-    // Type preference
     if (mediaType === "movie" && r.title.indexOf("فيلم") !== -1) score += 4;
     if (mediaType === "tv" && r.title.indexOf("مسلسل") !== -1) score += 4;
 
-    // Exact episode match for TV
     if (mediaType === "tv" && ep) {
       const em = r.title.match(/الحلقة\s+([0-9\u0660-\u0669]+)/);
       if (em) {
         const n = parseInt(em[1].replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660)), 10);
         if (n === ep) score += 6;
-        else score -= 2; // wrong episode — penalty
+        else score -= 2;
       }
     }
 
@@ -297,17 +289,14 @@ function resolveEmbed(embedUrl) {
   return Promise.resolve([]);
 }
 
-// Resolve all embeds from a candidate — return ALL working streams
 function resolveCandidate(candidate, mediaType, ep) {
   return __async(this, null, function* () {
     let targetUrl = candidate.url;
-    // For TV: if candidate isn't the exact episode, try to find it
     if (mediaType === "tv" && ep) {
       const m = candidate.title.match(/الحلقة\s+([0-9\u0660-\u0669]+)/);
       if (m) {
         const n = parseInt(m[1].replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660)), 10);
         if (n !== ep) {
-          // Wrong episode candidate — try fetching page and finding episode list
           try {
             const html = yield get(candidate.url);
             const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*)"/gi;
@@ -338,7 +327,6 @@ function resolveCandidate(candidate, mediaType, ep) {
     const embeds = extractEmbedUrls(seeHtml);
     if (!embeds.length) return [];
 
-    // Resolve all embeds in parallel
     const resolved = yield Promise.all(embeds.map(e => resolveEmbed(e).catch(() => [])));
     const streams = [];
     const seen = new Set();
@@ -366,17 +354,14 @@ function getStreams(tmdbId, mediaType, season, episode) {
 
     const ep = mediaType === "tv" ? Number(episode) || 1 : null;
 
-    // Build queries — for TV, include episode number
     const queries = [];
     if (mediaType === "tv") {
       for (const t of titles) queries.push(t + " الحلقة " + ep);
     }
     for (const t of titles) queries.push(t);
 
-    // === SPEED: fire ALL searches in parallel ===
     const searchGroups = yield Promise.all(queries.map(q => searchSite(q).catch(() => [])));
 
-    // Merge unique
     const allResults = [];
     const seenVids = new Set();
     for (const group of searchGroups) {
@@ -390,21 +375,17 @@ function getStreams(tmdbId, mediaType, season, episode) {
     if (!allResults.length) { console.log("[AhwakTV] No candidates"); return []; }
     console.log("[AhwakTV] Total candidates:", allResults.length);
 
-    // === LEAK FIX: score candidates by title match ===
     const primaryTitle = titles[0] || "";
     const scored = scoreCandidates(allResults, primaryTitle, mediaType, ep);
     console.log("[AhwakTV] Top candidates:",
-      scored.slice(0, 3).map(c => `[${c.score}] ${c.title.slice(0, 40)}`).join(" | "));
+      scored.slice(0, 5).map(c => `[${c.score}] ${c.title.slice(0, 40)}`).join(" | "));
 
-    // Filter: keep only candidates with strong score (>= 6)
-    const strong = scored.filter(c => c.score >= 6);
-    const pool = strong.length ? strong : scored;
-    console.log("[AhwakTV] Strong matches:", strong.length, "/ Using pool of:", pool.length);
+    // === FIX: use ALL scored candidates, sorted best-first. No filtering. ===
+    const pool = scored;
 
-    // === Try candidates in order, return ALL streams from the first that works ===
     const triedVids = new Set();
     for (const candidate of pool) {
-      if (triedVids.size >= 6) break;
+      if (triedVids.size >= 10) break;
       if (triedVids.has(candidate.vid)) continue;
       triedVids.add(candidate.vid);
 
