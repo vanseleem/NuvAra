@@ -3,12 +3,16 @@ var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gec
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
 function fetchText(url, referer) {
-  url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  url = String(url).replace(/[^\x00-\x7F]/g, function(c) {
+    return encodeURIComponent(c);
+  });
   var headers = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
   };
-  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) {
+    return encodeURIComponent(c);
+  });
   return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.text();
@@ -17,60 +21,72 @@ function fetchText(url, referer) {
 
 function decodeHtml(str) {
   return String(str || "")
-    .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'").replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 function stripHtml(str) {
-  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return decodeHtml(String(str || ""))
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeTitle(str) {
-  return String(str || "").toLowerCase()
-    .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ").replace(/\s+/g, " ").trim();
+  return String(str || "")
+    .toLowerCase()
+    .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function similarity(a, b) {
-  a = normalizeTitle(a); b = normalizeTitle(b);
+  a = normalizeTitle(a);
+  b = normalizeTitle(b);
   if (!a || !b) return 0;
   if (a === b) return 1;
   if (a.indexOf(b) !== -1 || b.indexOf(a) !== -1) return 0.85;
-  var aa = a.split(" "); var bb = b.split(" ");
-  var setB = {}; bb.forEach(function(x) { setB[x] = 1; });
-  var common = 0; aa.forEach(function(x) { if (setB[x]) common++; });
+  var aa = a.split(" ");
+  var bb = b.split(" ");
+  var setB = {};
+  bb.forEach(function(x) { setB[x] = 1; });
+  var common = 0;
+  aa.forEach(function(x) { if (setB[x]) common++; });
   return common / Math.max(aa.length, bb.length);
 }
 
 function getTmdbTitles(tmdbId, mediaType) {
   var type = mediaType === "tv" ? "tv" : "movie";
-  var urls = ["ar", "en"].map(function(lang) {
-    return "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) +
-      "?api_key=" + TMDB_API_KEY + "&language=" + lang;
-  });
-  return Promise.all(urls.map(function(u) {
-    return fetch(u).then(function(r) { return r.json(); }).catch(function() { return null; });
-  })).then(function(dataArr) {
-    var titles = [];
-    var year = null;
-    dataArr.forEach(function(d) {
-      if (!d) return;
-      var t = type === "movie" ? (d.title || d.original_title) : (d.name || d.original_name);
-      if (t && titles.indexOf(t) === -1) titles.push(t);
-      if (!year) {
-        var ds = type === "movie" ? d.release_date : d.first_air_date;
-        if (ds) year = ds.slice(0, 4);
-      }
+  var langs = ["ar", "en"];
+  var titles = [];
+  var year = null;
+
+  return langs.reduce(function(chain, lang) {
+    return chain.then(function() {
+      var apiUrl = "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) + "?api_key=" + TMDB_API_KEY + "&language=" + lang;
+      return fetch(apiUrl).then(function(r) { return r.json(); }).then(function(data) {
+        var title = type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name);
+        if (title && titles.indexOf(title) === -1) titles.push(title);
+        if (!year) {
+          var dateStr = type === "movie" ? data.release_date : data.first_air_date;
+          if (dateStr) year = dateStr.slice(0, 4);
+        }
+      }).catch(function() {});
     });
+  }, Promise.resolve()).then(function() {
+    if (!titles.length) throw new Error("Could not get TMDB titles for " + tmdbId);
     console.log("[Laroza] TMDB titles:", titles.join(" | "));
     return { titles: titles, year: year };
   });
 }
 
-// === SEARCH ===
 function searchLaroza(title) {
-  var q = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  var url = BASE + "/search.php?keywords=" + encodeURIComponent(q);
+  var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  var url = BASE + "/search.php?keywords=" + encodeURIComponent(cleanTitle);
   console.log("[Laroza] Search:", url);
   return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
@@ -99,7 +115,8 @@ function searchLaroza(title) {
 }
 
 function chooseResult(results, titles) {
-  var best = null, bestScore = 0;
+  var best = null;
+  var bestScore = 0;
   results.forEach(function(r) {
     var s = 0;
     titles.forEach(function(t) {
@@ -112,16 +129,20 @@ function chooseResult(results, titles) {
   return bestScore >= 0.3 ? best : null;
 }
 
-// === EXTRACT EMBED IFRAME FROM VIDEO PAGE ===
 function findEmbedUrl(videoHtml) {
   var m = videoHtml.match(/href=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
-  if (m) return decodeHtml(m[1]).indexOf("http") === 0 ? decodeHtml(m[1]) : BASE + decodeHtml(m[1]);
+  if (m) {
+    var u = decodeHtml(m[1]);
+    return u.indexOf("http") === 0 ? u : BASE + u;
+  }
   m = videoHtml.match(/src=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
-  if (m) return decodeHtml(m[1]).indexOf("http") === 0 ? decodeHtml(m[1]) : BASE + decodeHtml(m[1]);
+  if (m) {
+    var u2 = decodeHtml(m[1]);
+    return u2.indexOf("http") === 0 ? u2 : BASE + u2;
+  }
   return null;
 }
 
-// === EXTRACT OKHD IFRAME FROM EMBED PAGE ===
 function findOkhdIframe(embedHtml) {
   var m = embedHtml.match(/<iframe[^>]*src=["']([^"']*okhd\.[^"']+)["']/i);
   if (m) {
@@ -134,7 +155,6 @@ function findOkhdIframe(embedHtml) {
   return null;
 }
 
-// === DEAN EDWARDS PACKER UNPACKER ===
 function unpackEval(html) {
   var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
@@ -152,16 +172,13 @@ function unpackEval(html) {
   return payload;
 }
 
-// === EXTRACT M3U8 FROM OKHD PAGE ===
-function extractStreamsFromOkhd(okhdHtml, embedUrl) {
+function extractStreamsFromOkhd(okhdHtml) {
   var streams = [];
   var seen = {};
-
   var unpacked = unpackEval(okhdHtml);
   var search = unpacked || okhdHtml;
-  console.log("[Laroza] unpacked:", unpacked ? "yes (" + search.length + " bytes)" : "no");
+  console.log("[Laroza] unpacked:", unpacked ? "yes" : "no");
 
-  // m3u8 / mp4
   var re = /https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
   var m;
   while ((m = re.exec(search)) !== null) {
@@ -171,7 +188,6 @@ function extractStreamsFromOkhd(okhdHtml, embedUrl) {
     streams.push(u);
   }
 
-  // file: "..." pattern (JW Player)
   var re2 = /(?:file|source|src|url)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
   while ((m = re2.exec(search)) !== null) {
     var u2 = m[1].replace(/\\\//g, "/");
@@ -206,7 +222,7 @@ function makeStream(url, label, referer) {
   };
 }
 
-function resolveVideoPage(videoUrl, titles) {
+function resolveVideoPage(videoUrl) {
   return fetchText(videoUrl, BASE + "/").then(function(videoHtml) {
     var embedUrl = findEmbedUrl(videoHtml);
     console.log("[Laroza] embed:", embedUrl || "NOT FOUND");
@@ -216,13 +232,12 @@ function resolveVideoPage(videoUrl, titles) {
       console.log("[Laroza] okhd iframe:", okhdUrl || "NOT FOUND");
       if (!okhdUrl) return [];
       return fetchText(okhdUrl, embedUrl).then(function(okhdHtml) {
-        var directUrls = extractStreamsFromOkhd(okhdHtml, embedUrl);
+        var directUrls = extractStreamsFromOkhd(okhdHtml);
         if (directUrls.length) {
           return directUrls.map(function(u, i) {
             return makeStream(u, "Server " + (i + 1), embedUrl);
           });
         }
-        // Fallback: return the okhd embed URL itself
         console.log("[Laroza] No direct URL — returning embed as iframe");
         return [{
           name: "Laroza",
@@ -263,7 +278,7 @@ function getMovieStreams(tmdbId) {
       if (!all.length) return [];
       var best = chooseResult(all, meta.titles);
       if (!best) return [];
-      return resolveVideoPage(best.url, meta.titles);
+      return resolveVideoPage(best.url);
     });
   }).catch(function(err) {
     console.log("[Laroza] Movie error:", err.message);
@@ -274,7 +289,6 @@ function getMovieStreams(tmdbId) {
 function getTvStreams(tmdbId, season, episode) {
   var wanted = Number(episode) || 1;
   return getTmdbTitles(tmdbId, "tv").then(function(meta) {
-    // Search for series title + episode number
     var searches = [];
     meta.titles.forEach(function(t) {
       searches.push(t + " الحلقة " + wanted);
@@ -294,7 +308,6 @@ function getTvStreams(tmdbId, season, episode) {
       });
       console.log("[Laroza] Unique TV candidates:", all.length);
 
-      // Prefer results whose title contains the episode number
       var withEp = all.filter(function(r) {
         var dec = r.title;
         return new RegExp("(?:الحلق[ةه]\\s*" + wanted + "\\b|\\b" + wanted + "\\b)", "i").test(dec);
@@ -305,7 +318,7 @@ function getTvStreams(tmdbId, season, episode) {
       if (!pool.length) return [];
       var best = chooseResult(pool, meta.titles);
       if (!best) return [];
-      return resolveVideoPage(best.url, meta.titles);
+      return resolveVideoPage(best.url);
     });
   }).catch(function(err) {
     console.log("[Laroza] TV error:", err.message);
@@ -319,4 +332,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
   return getMovieStreams(tmdbId);
 }
 
-module.exports = { getStreams: getStreams };
+module.exports = {
+  getStreams: getStreams
+};
