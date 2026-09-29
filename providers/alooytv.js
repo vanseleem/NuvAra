@@ -1,12 +1,8 @@
 "use strict";
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
-    var fulfilled = (value) => {
-      try { step(generator.next(value)); } catch (e) { reject(e); }
-    };
-    var rejected = (value) => {
-      try { step(generator.throw(value)); } catch (e) { reject(e); }
-    };
+    var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } };
+    var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } };
     var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
     step((generator = generator.apply(__this, __arguments)).next());
   });
@@ -17,9 +13,6 @@ const TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
 function decodeHtml(str) {
   return String(str).replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&#x27;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
-}
-function clean(str) {
-  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 function get(_0) {
   return __async(this, arguments, function* (url, referer = DOMAIN + "/") {
@@ -87,6 +80,21 @@ function extractEpisodeLink(html, base, wantedEpisode) {
   }
   return null;
 }
+// === NEW: find any ?key= link (for movies) ===
+function extractAnyKeyLink(html, base) {
+  const re = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const rawHref = decodeHtml(m[1]).trim();
+    if (!rawHref) continue;
+    if (!/[?&]key=/i.test(rawHref)) continue;
+    if (!/\/watch\//i.test(rawHref)) continue;
+    let absolute;
+    try { absolute = absoluteUrl(rawHref, base); } catch (_) { continue; }
+    return absolute;
+  }
+  return null;
+}
 function extractSources(html) {
   const sources = [];
   function add(url) {
@@ -94,11 +102,21 @@ function extractSources(html) {
     url = decodeHtml(url).trim();
     if (url.startsWith("//")) url = "https:" + url;
     if (!/^https?:\/\//i.test(url)) return;
+    // skip placeholder hosts
+    if (/^https?:\/\/vid9\.0\/?$/i.test(url)) return;
     if (!sources.includes(url)) sources.push(url);
   }
   const sourceRe = /<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
   let m;
   while ((m = sourceRe.exec(html)) !== null) add(m[1]);
+  // Fallback: decode download_video.php base64
+  const dlRe = /download_video\.php\?video_url=([A-Za-z0-9+/=]+)/gi;
+  while ((m = dlRe.exec(html)) !== null) {
+    try {
+      const decoded = atob(m[1]);
+      if (decoded && /^https?:\/\//i.test(decoded)) add(decoded);
+    } catch (_) {}
+  }
   const unique = [];
   const seenPaths = new Set();
   for (const url of sources) {
@@ -198,38 +216,40 @@ function getStreams(tmdbId, mediaType, season, episode) {
     const seen = new Set();
 
     if (mediaType === "movie") {
-      // Movie flow: watch page is the player page
+      // === MOVIE FLOW: fetch base page, find ?key= link, fetch keyed page ===
       for (const watchUrl of watchPages) {
         try {
-          const movieHtml = yield get(watchUrl, DOMAIN + "/");
+          const baseHtml = yield get(watchUrl, DOMAIN + "/");
+          console.log("[AlooyTV] Movie base page loaded");
 
-          // 1) Try download link first
-          const dlMatch = movieHtml.match(/href=["']([^"']*download_video\.php[^"']+)["']/i);
-          if (dlMatch) {
-            const dlUrl = absoluteUrl(decodeHtml(dlMatch[1]), watchUrl);
-            console.log("[AlooyTV] Movie download link:", dlUrl);
-            if (!seen.has(dlUrl)) {
-              seen.add(dlUrl);
-              streams.push(makeMovieStream(dlUrl, titles[0]));
+          // Try the base page first (some movies may have direct sources)
+          let sources = extractSources(baseHtml);
+
+          // If placeholder only, follow ?key= link
+          if (!sources.length) {
+            const keyUrl = extractAnyKeyLink(baseHtml, watchUrl);
+            console.log("[AlooyTV] Movie key link:", keyUrl || "NOT FOUND");
+            if (keyUrl) {
+              const keyedHtml = yield get(keyUrl, watchUrl);
+              sources = extractSources(keyedHtml);
+              console.log("[AlooyTV] Movie keyed sources:", sources.length);
             }
+          } else {
+            console.log("[AlooyTV] Movie base sources:", sources.length);
           }
 
-          // 2) Fallback: <source> tags
-          const sources = extractSources(movieHtml);
-          console.log("[AlooyTV] Movie <source> count:", sources.length);
           for (const source of sources) {
             if (seen.has(source)) continue;
             seen.add(source);
             streams.push(makeMovieStream(source, titles[0]));
           }
-
           if (streams.length) break;
         } catch (e) {
           console.log("[AlooyTV] Movie watch failed:", watchUrl, e.message);
         }
       }
     } else {
-      // TV flow: find episode link inside series page
+      // === TV FLOW ===
       for (const watchUrl of watchPages) {
         try {
           const seriesHtml = yield get(watchUrl, DOMAIN + "/");
