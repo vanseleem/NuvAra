@@ -84,7 +84,6 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// === SEARCH: extract vid + title from <a title="..."> attribute ===
 function searchLaroza(title) {
   var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
   var url = BASE + "/search.php?keywords=" + encodeURIComponent(cleanTitle);
@@ -92,7 +91,6 @@ function searchLaroza(title) {
   return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
     var seen = {};
-    // Match: <a href="...video.php?vid=XXX" title="TITLE">
     var re = /<a[^>]*href=["']([^"']*\/video\.php\?vid=([^"'&]+))["'][^>]*title=["']([^"']+)["'][^>]*>/gi;
     var m;
     while ((m = re.exec(html)) !== null) {
@@ -104,7 +102,6 @@ function searchLaroza(title) {
       var absolute = fullUrl.indexOf("http") === 0 ? fullUrl : BASE + fullUrl;
       results.push({ url: absolute, title: linkTitle, vid: vid });
     }
-    // Fallback: match without title attribute
     if (!results.length) {
       var re2 = /<a[^>]*href=["']([^"']*\/video\.php\?vid=([^"'&]+))["'][^>]*>/gi;
       while ((m = re2.exec(html)) !== null) {
@@ -136,12 +133,10 @@ function chooseResult(results, titles) {
   return bestScore >= 0.3 ? best : null;
 }
 
-// === EMBED URL: constructed directly from vid ===
 function buildEmbedUrl(vid) {
   return BASE + "/embed.php?vid=" + vid;
 }
 
-// === OKHD iframe from embed page ===
 function findOkhdIframe(embedHtml) {
   var m = embedHtml.match(/<iframe[^>]*src=["']([^"']*okhd\.[^"']+)["']/i);
   if (m) {
@@ -154,7 +149,6 @@ function findOkhdIframe(embedHtml) {
   return null;
 }
 
-// === Dean Edwards Packer unpacker ===
 function unpackEval(html) {
   var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
@@ -166,7 +160,7 @@ function unpackEval(html) {
     if (keywords[count]) {
       var key = keywords[count];
       var pat = new RegExp("\\b" + count.toString(base) + "\\b", "g");
-      payload = payload.replace(pat, key);
+      payload = payload.replace(pat, function() { return key; });
     }
   }
   return payload;
@@ -213,12 +207,27 @@ function qualityFromUrl(url) {
 }
 
 function makeStream(url, label, referer) {
+  // OKPrime CDN demands OKHD's referer/origin — not Laroza's
+  var streamReferer = "https://mp6.okhd.site/";
+  var origin = "https://mp6.okhd.site";
+
+  // Force HTTPS (Android blocks cleartext)
+  if (url.indexOf("http://") === 0) {
+    url = "https://" + url.slice(7);
+  }
+
   return {
     name: "Laroza",
     title: label ? "Laroza \u2022 " + label : "Laroza",
     url: url,
     quality: qualityFromUrl(url),
-    referer: referer || BASE + "/"
+    referer: streamReferer,
+    headers: {
+      "User-Agent": UA,
+      "Referer": streamReferer,
+      "Origin": origin,
+      "Accept": "*/*"
+    }
   };
 }
 
