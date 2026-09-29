@@ -404,7 +404,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     // === Try candidates in order, return ALL streams from the first that works ===
     const triedVids = new Set();
     for (const candidate of pool) {
-      if (triedVids.size >= 10) break;
+      if (triedVids.size >= 6) break;
       if (triedVids.has(candidate.vid)) continue;
       triedVids.add(candidate.vid);
 
