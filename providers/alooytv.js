@@ -14,6 +14,36 @@ const TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 function decodeHtml(str) {
   return String(str).replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&#x27;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
 }
+
+// === Base64 decoder that works without atob ===
+function b64decode(input) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  let str = String(input).replace(/[^A-Za-z0-9+/=]/g, "");
+  let output = "";
+  for (let i = 0; i < str.length; i += 4) {
+    const c1 = chars.indexOf(str[i]);
+    const c2 = chars.indexOf(str[i + 1]);
+    const c3 = chars.indexOf(str[i + 2]);
+    const c4 = chars.indexOf(str[i + 3]);
+    const b1 = (c1 << 2) | (c2 >> 4);
+    const b2 = ((c2 & 15) << 4) | (c3 >> 2);
+    const b3 = ((c3 & 3) << 6) | c4;
+    output += String.fromCharCode(b1);
+    if (c3 !== 64) output += String.fromCharCode(b2);
+    if (c4 !== 64) output += String.fromCharCode(b3);
+  }
+  try {
+    return decodeURIComponent(escape(output));
+  } catch (_) {
+    return output;
+  }
+}
+
+function isPlaceholder(url) {
+  // vid0.0, vid1.0, vid9.0, etc. — anything matching vid\d+.0 with no real host
+  return /^https?:\/\/vid\d+\.0\/?$/i.test(String(url).trim());
+}
+
 function get(_0) {
   return __async(this, arguments, function* (url, referer = DOMAIN + "/") {
     const res = yield fetch(url, {
@@ -28,6 +58,7 @@ function get(_0) {
     return yield res.text();
   });
 }
+
 function absoluteUrl(value, base) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -45,6 +76,7 @@ function absoluteUrl(value, base) {
   if (slash >= 0) return cleanBase.slice(0, slash + 1) + raw;
   return raw;
 }
+
 function extractWatchLinks(html, base) {
   const out = [];
   const re = /href\s*=\s*["']([^"']+)["']/gi;
@@ -58,6 +90,7 @@ function extractWatchLinks(html, base) {
   }
   return out;
 }
+
 function extractEpisodeLink(html, base, wantedEpisode) {
   const wanted = Number(wantedEpisode);
   const anchorRe = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
@@ -80,7 +113,7 @@ function extractEpisodeLink(html, base, wantedEpisode) {
   }
   return null;
 }
-// === NEW: find any ?key= link (for movies) ===
+
 function extractAnyKeyLink(html, base) {
   const re = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
   let m;
@@ -95,6 +128,7 @@ function extractAnyKeyLink(html, base) {
   }
   return null;
 }
+
 function extractSources(html) {
   const sources = [];
   function add(url) {
@@ -102,21 +136,22 @@ function extractSources(html) {
     url = decodeHtml(url).trim();
     if (url.startsWith("//")) url = "https:" + url;
     if (!/^https?:\/\//i.test(url)) return;
-    // skip placeholder hosts
-    if (/^https?:\/\/vid9\.0\/?$/i.test(url)) return;
+    if (isPlaceholder(url)) return;   // <-- THE FIX: catch vid6.0, vid9.0, etc.
     if (!sources.includes(url)) sources.push(url);
   }
   const sourceRe = /<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
   let m;
   while ((m = sourceRe.exec(html)) !== null) add(m[1]);
-  // Fallback: decode download_video.php base64
+
+  // Fallback: decode download_video.php base64 params
   const dlRe = /download_video\.php\?video_url=([A-Za-z0-9+/=]+)/gi;
   while ((m = dlRe.exec(html)) !== null) {
     try {
-      const decoded = atob(m[1]);
+      const decoded = b64decode(m[1]);
       if (decoded && /^https?:\/\//i.test(decoded)) add(decoded);
     } catch (_) {}
   }
+
   const unique = [];
   const seenPaths = new Set();
   for (const url of sources) {
@@ -127,6 +162,7 @@ function extractSources(html) {
   }
   return unique;
 }
+
 function qualityFromUrl(url) {
   const s = String(url).toLowerCase();
   if (/2160|4k/.test(s)) return "4K";
@@ -137,6 +173,7 @@ function qualityFromUrl(url) {
   if (/360/.test(s)) return "360p";
   return "Unknown";
 }
+
 function makeStream(url, episode) {
   return {
     name: "🎉 AlooyTV",
@@ -146,6 +183,7 @@ function makeStream(url, episode) {
     headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }
   };
 }
+
 function makeMovieStream(url, movieTitle) {
   return {
     name: "🎉 AlooyTV",
@@ -155,6 +193,7 @@ function makeMovieStream(url, movieTitle) {
     headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }
   };
 }
+
 function tmdbTitles(tmdbId, mediaType) {
   return __async(this, null, function* () {
     const type = mediaType === "movie" ? "movie" : "tv";
@@ -173,6 +212,7 @@ function tmdbTitles(tmdbId, mediaType) {
     return titles;
   });
 }
+
 function searchAlooy(title) {
   return __async(this, null, function* () {
     if (!title) return [];
@@ -181,6 +221,7 @@ function searchAlooy(title) {
     return extractWatchLinks(html, url);
   });
 }
+
 function getStreams(tmdbId, mediaType, season, episode) {
   return __async(this, null, function* () {
     console.log("[AlooyTV] Request:", tmdbId, mediaType, season, episode);
@@ -216,16 +257,12 @@ function getStreams(tmdbId, mediaType, season, episode) {
     const seen = new Set();
 
     if (mediaType === "movie") {
-      // === MOVIE FLOW: fetch base page, find ?key= link, fetch keyed page ===
       for (const watchUrl of watchPages) {
         try {
           const baseHtml = yield get(watchUrl, DOMAIN + "/");
-          console.log("[AlooyTV] Movie base page loaded");
-
-          // Try the base page first (some movies may have direct sources)
           let sources = extractSources(baseHtml);
+          console.log("[AlooyTV] Movie base sources:", sources.length);
 
-          // If placeholder only, follow ?key= link
           if (!sources.length) {
             const keyUrl = extractAnyKeyLink(baseHtml, watchUrl);
             console.log("[AlooyTV] Movie key link:", keyUrl || "NOT FOUND");
@@ -234,8 +271,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
               sources = extractSources(keyedHtml);
               console.log("[AlooyTV] Movie keyed sources:", sources.length);
             }
-          } else {
-            console.log("[AlooyTV] Movie base sources:", sources.length);
           }
 
           for (const source of sources) {
@@ -249,7 +284,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
         }
       }
     } else {
-      // === TV FLOW ===
       for (const watchUrl of watchPages) {
         try {
           const seriesHtml = yield get(watchUrl, DOMAIN + "/");
@@ -275,4 +309,5 @@ function getStreams(tmdbId, mediaType, season, episode) {
     return streams;
   });
 }
+
 module.exports = { getStreams };
