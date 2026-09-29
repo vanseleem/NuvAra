@@ -1,0 +1,322 @@
+var BASE = "https://llaroza.mom";
+var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
+
+function fetchText(url, referer) {
+  url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  var headers = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  };
+  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.text();
+  });
+}
+
+function decodeHtml(str) {
+  return String(str || "")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'").replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function stripHtml(str) {
+  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTitle(str) {
+  return String(str || "").toLowerCase()
+    .replace(/[^a-zA-Z0-9\u0600-\u06FF]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function similarity(a, b) {
+  a = normalizeTitle(a); b = normalizeTitle(b);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.indexOf(b) !== -1 || b.indexOf(a) !== -1) return 0.85;
+  var aa = a.split(" "); var bb = b.split(" ");
+  var setB = {}; bb.forEach(function(x) { setB[x] = 1; });
+  var common = 0; aa.forEach(function(x) { if (setB[x]) common++; });
+  return common / Math.max(aa.length, bb.length);
+}
+
+function getTmdbTitles(tmdbId, mediaType) {
+  var type = mediaType === "tv" ? "tv" : "movie";
+  var urls = ["ar", "en"].map(function(lang) {
+    return "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) +
+      "?api_key=" + TMDB_API_KEY + "&language=" + lang;
+  });
+  return Promise.all(urls.map(function(u) {
+    return fetch(u).then(function(r) { return r.json(); }).catch(function() { return null; });
+  })).then(function(dataArr) {
+    var titles = [];
+    var year = null;
+    dataArr.forEach(function(d) {
+      if (!d) return;
+      var t = type === "movie" ? (d.title || d.original_title) : (d.name || d.original_name);
+      if (t && titles.indexOf(t) === -1) titles.push(t);
+      if (!year) {
+        var ds = type === "movie" ? d.release_date : d.first_air_date;
+        if (ds) year = ds.slice(0, 4);
+      }
+    });
+    console.log("[Laroza] TMDB titles:", titles.join(" | "));
+    return { titles: titles, year: year };
+  });
+}
+
+// === SEARCH ===
+function searchLaroza(title) {
+  var q = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  var url = BASE + "/search.php?keywords=" + encodeURIComponent(q);
+  console.log("[Laroza] Search:", url);
+  return fetchText(url, BASE + "/").then(function(html) {
+    var results = [];
+    var seen = {};
+    var re = /href=["']([^"']*\/video\.php\?vid=[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var href = decodeHtml(m[1]);
+      if (seen[href]) continue;
+      seen[href] = 1;
+      var absolute = href.indexOf("http") === 0 ? href : BASE + href;
+      var block = m[2];
+      var titleMatch = block.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) ||
+                       block.match(/title=["']([^"']+)["']/i) ||
+                       block.match(/alt=["']([^"']+)["']/i);
+      var t = titleMatch ? stripHtml(titleMatch[1]) : "";
+      if (!t) {
+        var pm = href.match(/vid=([^&#]+)/);
+        t = pm ? pm[1] : "";
+      }
+      if (t) results.push({ url: absolute, title: t });
+    }
+    console.log("[Laroza] Search results:", results.length);
+    return results;
+  });
+}
+
+function chooseResult(results, titles) {
+  var best = null, bestScore = 0;
+  results.forEach(function(r) {
+    var s = 0;
+    titles.forEach(function(t) {
+      var sc = similarity(r.title, t);
+      if (sc > s) s = sc;
+    });
+    if (s > bestScore) { bestScore = s; best = r; }
+  });
+  if (best) console.log("[Laroza] Best:", best.title, "score:", bestScore.toFixed(3));
+  return bestScore >= 0.3 ? best : null;
+}
+
+// === EXTRACT EMBED IFRAME FROM VIDEO PAGE ===
+function findEmbedUrl(videoHtml) {
+  var m = videoHtml.match(/href=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
+  if (m) return decodeHtml(m[1]).indexOf("http") === 0 ? decodeHtml(m[1]) : BASE + decodeHtml(m[1]);
+  m = videoHtml.match(/src=["']([^"']*\/embed\.php\?vid=[^"']+)["']/i);
+  if (m) return decodeHtml(m[1]).indexOf("http") === 0 ? decodeHtml(m[1]) : BASE + decodeHtml(m[1]);
+  return null;
+}
+
+// === EXTRACT OKHD IFRAME FROM EMBED PAGE ===
+function findOkhdIframe(embedHtml) {
+  var m = embedHtml.match(/<iframe[^>]*src=["']([^"']*okhd\.[^"']+)["']/i);
+  if (m) {
+    var u = decodeHtml(m[1]);
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    return u;
+  }
+  m = embedHtml.match(/<iframe[^>]*src=["'](https?:\/\/[^"']+)["']/i);
+  if (m) return decodeHtml(m[1]);
+  return null;
+}
+
+// === DEAN EDWARDS PACKER UNPACKER ===
+function unpackEval(html) {
+  var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
+  if (!m) return null;
+  var payload = m[1];
+  var base = parseInt(m[2], 10);
+  var count = parseInt(m[3], 10);
+  var keywords = m[4].split("|");
+  while (count--) {
+    if (keywords[count]) {
+      var key = keywords[count];
+      var pat = new RegExp("\\b" + count.toString(base) + "\\b", "g");
+      payload = payload.replace(pat, key);
+    }
+  }
+  return payload;
+}
+
+// === EXTRACT M3U8 FROM OKHD PAGE ===
+function extractStreamsFromOkhd(okhdHtml, embedUrl) {
+  var streams = [];
+  var seen = {};
+
+  var unpacked = unpackEval(okhdHtml);
+  var search = unpacked || okhdHtml;
+  console.log("[Laroza] unpacked:", unpacked ? "yes (" + search.length + " bytes)" : "no");
+
+  // m3u8 / mp4
+  var re = /https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
+  var m;
+  while ((m = re.exec(search)) !== null) {
+    var u = m[0].replace(/\\\//g, "/").replace(/\\u0026/g, "&");
+    if (seen[u]) continue;
+    seen[u] = 1;
+    streams.push(u);
+  }
+
+  // file: "..." pattern (JW Player)
+  var re2 = /(?:file|source|src|url)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
+  while ((m = re2.exec(search)) !== null) {
+    var u2 = m[1].replace(/\\\//g, "/");
+    if (u2.indexOf("http") !== 0) continue;
+    if (seen[u2]) continue;
+    seen[u2] = 1;
+    streams.push(u2);
+  }
+
+  console.log("[Laroza] m3u8/mp4 found:", streams.length);
+  return streams;
+}
+
+function qualityFromUrl(url) {
+  var s = String(url).toLowerCase();
+  if (/2160|4k/.test(s)) return "4K";
+  if (/1440/.test(s)) return "1440p";
+  if (/1080/.test(s)) return "1080p";
+  if (/720/.test(s)) return "720p";
+  if (/480/.test(s)) return "480p";
+  if (/360/.test(s)) return "360p";
+  return "Unknown";
+}
+
+function makeStream(url, label, referer) {
+  return {
+    name: "Laroza",
+    title: label ? "Laroza \u2022 " + label : "Laroza",
+    url: url,
+    quality: qualityFromUrl(url),
+    referer: referer || BASE + "/"
+  };
+}
+
+function resolveVideoPage(videoUrl, titles) {
+  return fetchText(videoUrl, BASE + "/").then(function(videoHtml) {
+    var embedUrl = findEmbedUrl(videoHtml);
+    console.log("[Laroza] embed:", embedUrl || "NOT FOUND");
+    if (!embedUrl) return [];
+    return fetchText(embedUrl, videoUrl).then(function(embedHtml) {
+      var okhdUrl = findOkhdIframe(embedHtml);
+      console.log("[Laroza] okhd iframe:", okhdUrl || "NOT FOUND");
+      if (!okhdUrl) return [];
+      return fetchText(okhdUrl, embedUrl).then(function(okhdHtml) {
+        var directUrls = extractStreamsFromOkhd(okhdHtml, embedUrl);
+        if (directUrls.length) {
+          return directUrls.map(function(u, i) {
+            return makeStream(u, "Server " + (i + 1), embedUrl);
+          });
+        }
+        // Fallback: return the okhd embed URL itself
+        console.log("[Laroza] No direct URL — returning embed as iframe");
+        return [{
+          name: "Laroza",
+          title: "Laroza (Embed)",
+          url: okhdUrl,
+          quality: "Auto",
+          type: "iframe",
+          referer: embedUrl
+        }];
+      }).catch(function(err) {
+        console.log("[Laroza] okhd fetch failed:", err.message);
+        return [{
+          name: "Laroza",
+          title: "Laroza (Embed)",
+          url: okhdUrl,
+          quality: "Auto",
+          type: "iframe",
+          referer: embedUrl
+        }];
+      });
+    });
+  });
+}
+
+function getMovieStreams(tmdbId) {
+  return getTmdbTitles(tmdbId, "movie").then(function(meta) {
+    return Promise.all(meta.titles.map(function(t) {
+      return searchLaroza(t).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [];
+      var seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+        });
+      });
+      console.log("[Laroza] Unique movie candidates:", all.length);
+      if (!all.length) return [];
+      var best = chooseResult(all, meta.titles);
+      if (!best) return [];
+      return resolveVideoPage(best.url, meta.titles);
+    });
+  }).catch(function(err) {
+    console.log("[Laroza] Movie error:", err.message);
+    return [];
+  });
+}
+
+function getTvStreams(tmdbId, season, episode) {
+  var wanted = Number(episode) || 1;
+  return getTmdbTitles(tmdbId, "tv").then(function(meta) {
+    // Search for series title + episode number
+    var searches = [];
+    meta.titles.forEach(function(t) {
+      searches.push(t + " الحلقة " + wanted);
+      searches.push(t + " " + wanted);
+      searches.push(t);
+    });
+
+    return Promise.all(searches.map(function(q) {
+      return searchLaroza(q).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [];
+      var seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+        });
+      });
+      console.log("[Laroza] Unique TV candidates:", all.length);
+
+      // Prefer results whose title contains the episode number
+      var withEp = all.filter(function(r) {
+        var dec = r.title;
+        return new RegExp("(?:الحلق[ةه]\\s*" + wanted + "\\b|\\b" + wanted + "\\b)", "i").test(dec);
+      });
+      var pool = withEp.length ? withEp : all;
+      console.log("[Laroza] TV candidates with ep " + wanted + ":", withEp.length, "/ pool:", pool.length);
+
+      if (!pool.length) return [];
+      var best = chooseResult(pool, meta.titles);
+      if (!best) return [];
+      return resolveVideoPage(best.url, meta.titles);
+    });
+  }).catch(function(err) {
+    console.log("[Laroza] TV error:", err.message);
+    return [];
+  });
+}
+
+function getStreams(tmdbId, mediaType, season, episode) {
+  console.log("[Laroza] getStreams:", tmdbId, mediaType, season, episode);
+  if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
+  return getMovieStreams(tmdbId);
+}
+
+module.exports = { getStreams: getStreams };
