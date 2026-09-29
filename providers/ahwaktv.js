@@ -13,10 +13,6 @@ const USER_AGENT = "Mozilla/5.0 (Linux; Android 10, K) AppleWebKit/537.36 (KHTML
 const DOMAIN = "https://yam.ahwaktv.net";
 const TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-// Timeouts — the #1 cause of the 15s stalls was dead mirrors with no cutoff.
-const FETCH_TIMEOUT_MS = 6000;
-const RESOLVE_TIMEOUT_MS = 6000;
-
 function decodeHtml(str) {
   return String(str)
     .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"')
@@ -25,38 +21,12 @@ function decodeHtml(str) {
 }
 
 function normalizeArabic(s) {
-  return String(s || "")
-    .replace(/[\u064B-\u065F\u0670]/g, "")
-    .replace(/[أإآ]/g, "ا")
-    .replace(/ى/g, "ي")
-    .replace(/ة/g, "ه")
-    .replace(/[^\w\u0600-\u06FF ]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+  return String(s || "").replace(/[\u064B-\u065F\u0670]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-function arabicToInt(s) {
-  return parseInt(String(s).replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660)), 10);
-}
-
-// fetch with a hard timeout so a dead mirror can't stall the whole lookup
-function fetchWithTimeout(url, opts, timeoutMs) {
+function get(url, referer) {
   return __async(this, null, function* () {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeoutMs || FETCH_TIMEOUT_MS);
-    try {
-      const res = yield fetch(url, Object.assign({}, opts, { signal: controller.signal }));
-      return res;
-    } finally {
-      clearTimeout(t);
-    }
-  });
-}
-
-function get(url, referer, timeoutMs) {
-  return __async(this, null, function* () {
-    const res = yield fetchWithTimeout(url, {
+    const res = yield fetch(url, {
       headers: {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -64,7 +34,7 @@ function get(url, referer, timeoutMs) {
         "Accept-Language": "ar,en;q=0.9"
       },
       redirect: "follow"
-    }, timeoutMs);
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     return yield res.text();
   });
@@ -73,23 +43,24 @@ function get(url, referer, timeoutMs) {
 function tmdbTitles(tmdbId, mediaType) {
   return __async(this, null, function* () {
     const type = mediaType === "movie" ? "movie" : "tv";
-    // fire both languages in parallel instead of sequentially
-    const results = yield Promise.all(["ar", "en"].map(lang => __async(this, null, function* () {
+    const titles = [];
+    for (const lang of ["ar", "en"]) {
       try {
         const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=${lang}`;
-        const res = yield fetchWithTimeout(url, {}, FETCH_TIMEOUT_MS);
-        if (!res.ok) return null;
+        const res = yield fetch(url);
+        if (!res.ok) continue;
         const data = yield res.json();
-        return type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name);
-      } catch (_) { return null; }
-    })));
-    const titles = [];
-    for (const t of results) if (t && !titles.includes(t)) titles.push(t);
+        const t = type === "movie"
+          ? (data.title || data.original_title)
+          : (data.name || data.original_name);
+        if (t && !titles.includes(t)) titles.push(t);
+      } catch (_) {}
+    }
     return titles;
   });
 }
 
-// Search — NO filter here, just collect everything
+// Search — filters results so only titles matching the query survive
 function searchSite(query) {
   return __async(this, null, function* () {
     const url = `${DOMAIN}/search.php?keywords=${encodeURIComponent(query)}`;
@@ -97,6 +68,8 @@ function searchSite(query) {
     const html = yield get(url);
     const results = [];
     const seen = new Set();
+    const nq = normalizeArabic(query);
+    const queryWords = nq.split(/\s+/).filter(w => w.length > 1);
 
     const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*)"/gi;
     let m;
@@ -107,94 +80,20 @@ function searchSite(query) {
       let u = m[1];
       if (u.startsWith("//")) u = "https:" + u;
       else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
-      results.push({ url: u, title: decodeHtml(m[3]), vid });
+      const title = decodeHtml(m[3]);
+
+      // Filter: title must contain the query or at least one query word
+      const nt = normalizeArabic(title);
+      const containsQuery = nt.indexOf(nq) !== -1;
+      const wordMatch = queryWords.length === 0 || queryWords.some(w => nt.indexOf(w) !== -1);
+      if (!containsQuery && !wordMatch) continue;
+
+      results.push({ url: u, title, vid });
     }
 
-    // Fallback: no title attribute
-    if (!results.length) {
-      const re2 = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"/gi;
-      while ((m = re2.exec(html)) !== null) {
-        const vid = m[2];
-        if (seen.has(vid)) continue;
-        seen.add(vid);
-        let u = m[1];
-        if (u.startsWith("//")) u = "https:" + u;
-        else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
-        results.push({ url: u, title: "", vid });
-      }
-    }
-
-    console.log("[AhwakTV] Raw results:", results.length);
+    console.log("[AhwakTV] Results:", results.length);
     return results;
   });
-}
-
-// Score and sort candidates by how well their title matches the query
-function scoreCandidates(results, query, mediaType, ep) {
-  if (!results.length) return [];
-  const nq = normalizeArabic(query);
-  // Strip "الحلقة N" from query
-  const baseQuery = nq.replace(/الحلق[هة]\s*[0-9\u0660-\u0669]+/g, "").trim();
-  const baseWords = baseQuery.split(/\s+/).filter(w => w.length >= 2);
-
-  const scored = results.map(r => {
-    const nt = normalizeArabic(r.title);
-    let score = 0;
-
-    // Full query containment — biggest signal
-    if (baseQuery && nt.indexOf(baseQuery) !== -1) score += 10;
-
-    // Per-word match
-    let wordsHit = 0;
-    for (const w of baseWords) {
-      if (nt.indexOf(w) !== -1) wordsHit++;
-    }
-    if (baseWords.length) {
-      const ratio = wordsHit / baseWords.length;
-      score += Math.round(ratio * 8);
-    }
-
-    // Type preference
-    if (mediaType === "movie" && r.title.indexOf("فيلم") !== -1) score += 4;
-    if (mediaType === "tv" && r.title.indexOf("مسلسل") !== -1) score += 4;
-
-    // Exact episode match for TV
-    if (mediaType === "tv" && ep) {
-      const em = r.title.match(/الحلقة\s+([0-9\u0660-\u0669]+)/);
-      if (em) {
-        const n = arabicToInt(em[1]);
-        if (n === ep) score += 6;
-        else score -= 2; // wrong episode — penalty
-      }
-    }
-
-    return Object.assign({}, r, { score });
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored;
-}
-
-// How many of the query's significant words appear in the title. Used as
-// a soft-but-meaningful gate — specifically to stop resolveCandidate from
-// trusting a fetched page's episode-nav when that page turns out to be a
-// completely different show (the actual leak). Deliberately lenient
-// (>= 0.4, min 1 word) because site titles are noisy — wrapped in
-// "مشاهدة و تحميل فيلم ..." boilerplate, transliteration variants, word
-// order differences from TMDb's Arabic title — and the episode-number
-// check downstream is the real precision guard, not this.
-function titleMatchesQuery(title, query) {
-  const nt = normalizeArabic(title);
-  const nq = normalizeArabic(query).replace(/الحلق[هة]\s*[0-9\u0660-\u0669]+/g, "").trim();
-  const words = nq.split(/\s+/).filter(w => w.length >= 2 &&
-    !["فيلم", "مسلسل", "مترجم", "مترجمة", "كامل", "الموسم", "حلقة", "مدبلج", "مدبلجة", "الجزء"].includes(w));
-  if (!words.length) return nt.indexOf(nq) !== -1 || nq.length === 0;
-  const hits = words.filter(w => nt.indexOf(w) !== -1).length;
-  // at least 40% of significant words present, or at least one strong
-  // (4+ char) word match — enough to rule out an unrelated show without
-  // false-rejecting legitimate title variance
-  if (hits / words.length >= 0.4) return true;
-  return words.some(w => w.length >= 4 && nt.indexOf(w) !== -1);
 }
 
 function extractSeeUrl(html) {
@@ -207,51 +106,7 @@ function extractSeeUrl(html) {
   return null;
 }
 
-// Grab just the page <title>/og:title so we can verify a fetched watch.php
-// page is actually the show we think it is before trusting anything on it.
-function extractPageTitle(html) {
-  let m = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']*)["']/i);
-  if (m) return decodeHtml(m[1]);
-  m = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-  if (m) return decodeHtml(m[1]);
-  return "";
-}
-
-// Extract the season/episode navigation block only — NOT the whole page.
-// The real markup is a run of consecutive
-//   <a href="watch.php?vid=XXX" title="...show name... الحلقة N ...">N حلقة</a>
-// anchors with no other tags between them (see site sample). We isolate
-// that run instead of scanning the entire document, which is what let the
-// "قد يعجبك أيضاً" (related videos) block at the bottom of every page leak
-// into results before.
-function extractEpisodeNav(html, showNameHint) {
-  const results = [];
-  const seen = new Set();
-  // Anchors of the exact episode-nav shape, contiguous or not — but we
-  // additionally require each one to contain "الحلقة" (episode) in its
-  // title, which the related/recommended block's titles frequently don't
-  // share in the same numbered form, AND we require the show name (when we
-  // have one) to appear in the anchor title. This is the actual fix for
-  // the leak: no anchor is trusted just because it looks like a watch.php
-  // link — it must look like *this show's* episode link.
-  const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*الحلق[هة][^"]*)"[^>]*>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const vid = m[2];
-    if (seen.has(vid)) continue;
-    const title = decodeHtml(m[3]);
-    if (showNameHint && !titleMatchesQuery(title, showNameHint)) continue;
-    const em = title.match(/الحلق[هة]\s+([0-9\u0660-\u0669]+)/);
-    if (!em) continue;
-    seen.add(vid);
-    let u = m[1];
-    if (u.startsWith("//")) u = "https:" + u;
-    else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
-    results.push({ url: u, title, vid, num: arabicToInt(em[1]) });
-  }
-  return results;
-}
-
+// === FIX: extract ANY data-* attribute with an http URL, plus iframes/hrefs ===
 function extractEmbedUrls(html) {
   const out = [];
   const seen = new Set();
@@ -266,23 +121,15 @@ function extractEmbedUrls(html) {
     out.push(u);
   }
   let m;
-  // <iframe src="..."> — the real player embeds
+  // 1) iframes
   const reIf = /<iframe[^>]*src=["']([^"']+)["']/gi;
   while ((m = reIf.exec(html)) !== null) add(m[1]);
-
-  // Known-host URLs anywhere in the page (covers JS-set players not in an iframe tag yet)
+  // 2) ANY data-* attribute whose value starts with http (catches data-embed-url, data-src, etc)
+  const reData = /data-[a-z0-9_-]+=["'](https?:\/\/[^"']+)["']/gi;
+  while ((m = reData.exec(html)) !== null) add(m[1]);
+  // 3) raw URLs to known hosts anywhere
   const reAny = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com)[^"'\s<>]*/gi;
   while ((m = reAny.exec(html)) !== null) add(m[0]);
-
-  // NOTE: the previous version also swept every data-* attribute that
-  // looked like a URL. That was too broad — it picked up lazy-load
-  // placeholders, tracking/redirect attributes, and ad-network data
-  // attributes that happened to contain a known host substring (e.g. an
-  // ad redirect wrapper like `...?dest=uqload...`), which is exactly the
-  // "broken extra link" symptom. Dropped in favor of iframe + explicit
-  // host match only, which is what actually reflects working servers on
-  // this site.
-
   return out;
 }
 
@@ -307,56 +154,61 @@ function makeStream(url, label, referer, type) {
   };
 }
 
-// Basic sanity check on a resolved stream URL before we hand it back.
-// Cheap, no extra network round trip: just rejects empty/placeholder/
-// truncated URLs that some resolvers can produce on a malformed page
-// (e.g. an expired pass_md5 token, a truncated eval-unpack match).
-function isPlausibleStreamUrl(url) {
-  if (!url || typeof url !== "string") return false;
-  if (url.length < 15) return false;
-  if (!/^https:\/\//i.test(url)) return false;
-  if (/undefined|null|NaN/i.test(url)) return false;
-  return true;
-}
-
+// === VIDMOLY ===
 function resolveVidMoly(embedUrl) {
+  console.log("[AhwakTV] VidMoly:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
     try {
-      const res = yield fetchWithTimeout(embedUrl, { headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }, redirect: "follow" }, RESOLVE_TIMEOUT_MS);
+      const res = yield fetch(embedUrl, {
+        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/", "Accept": "text/html,*/*" },
+        redirect: "follow"
+      });
       const html = yield res.text();
       let m = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/i);
       if (!m) m = html.match(/file\s*:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/i);
-      if (!m) return [];
+      if (!m) { console.log("[AhwakTV] VidMoly: no m3u8"); return []; }
       const url = m[1].replace(/\\\//g, "/");
-      if (!isPlausibleStreamUrl(url)) return [];
+      console.log("[AhwakTV] VidMoly ✓");
       return [makeStream(url, "VidMoly", "https://vidmoly.to/", "hls")];
     } catch (e) { console.log("[AhwakTV] VidMoly err:", e.message); return []; }
   });
 }
 
+// === DOODSTREAM family: playmogo, dood, uqload, ds2play, vidspeed ===
 function resolveDood(embedUrl) {
+  console.log("[AhwakTV] Dood:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
     try {
-      const res = yield fetchWithTimeout(embedUrl, { headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }, redirect: "follow" }, RESOLVE_TIMEOUT_MS);
+      const res = yield fetch(embedUrl, {
+        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
+        redirect: "follow"
+      });
       const html = yield res.text();
       const pm = html.match(/["'](\/pass_md5\/[^"']+)["']/i);
-      if (!pm) return [];
-      const token = (pm[1].match(/\/pass_md5\/([^\/]+)/) || [])[1] || "";
-      const expiry = (html.match(/[?&]expiry=([0-9]+)/i) || [])[1] || String(Math.floor(Date.now()/1000) + 3600);
-      const origin = (embedUrl.match(/^(https?:\/\/[^\/]+)/) || [])[1] || "";
-      const pr = yield fetchWithTimeout(origin + pm[1], { headers: { "User-Agent": USER_AGENT, "Referer": embedUrl }, redirect: "follow" }, RESOLVE_TIMEOUT_MS);
+      if (!pm) { console.log("[AhwakTV] Dood: no pass_md5"); return []; }
+      const tokenMatch = pm[1].match(/\/pass_md5\/([^\/]+)/);
+      const token = tokenMatch ? tokenMatch[1] : "";
+      const expiryMatch = html.match(/[?&]expiry=([0-9]+)/i);
+      const expiry = expiryMatch ? expiryMatch[1] : String(Math.floor(Date.now()/1000) + 3600);
+      const originMatch = embedUrl.match(/^(https?:\/\/[^\/]+)/);
+      const origin = originMatch ? originMatch[1] : "";
+      const pr = yield fetch(origin + pm[1], {
+        headers: { "User-Agent": USER_AGENT, "Referer": embedUrl },
+        redirect: "follow"
+      });
       const base = yield pr.text();
-      if (!base || base.length < 10 || !/^https?:\/\//i.test(base.trim())) return [];
+      if (!base || base.length < 10) { console.log("[AhwakTV] Dood: empty base"); return []; }
       const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
       let rnd = "";
       for (let i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
-      const url = base.trim() + rnd + "?token=" + token + "&expiry=" + expiry;
-      if (!isPlausibleStreamUrl(url) || !token) return [];
-      return [makeStream(url, "Dood", embedUrl, "mp4")];
+      const finalUrl = base + rnd + "?token=" + token + "&expiry=" + expiry;
+      console.log("[AhwakTV] Dood ✓");
+      return [makeStream(finalUrl, "Dood", embedUrl, "mp4")];
     } catch (e) { console.log("[AhwakTV] Dood err:", e.message); return []; }
   });
 }
 
+// === 1VID ===
 function unpackEval(html) {
   const m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
@@ -366,46 +218,66 @@ function unpackEval(html) {
   const kw = m[4].split("|");
   let i = count;
   while (i--) {
-    if (kw[i]) payload = payload.replace(new RegExp("\\b" + i.toString(base) + "\\b", "g"), kw[i]);
+    if (kw[i]) {
+      const pat = new RegExp("\\b" + i.toString(base) + "\\b", "g");
+      payload = payload.replace(pat, kw[i]);
+    }
   }
   return payload;
 }
 
 function resolve1Vid(embedUrl) {
+  console.log("[AhwakTV] 1Vid:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
     try {
-      const res = yield fetchWithTimeout(embedUrl, { headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }, redirect: "follow" }, RESOLVE_TIMEOUT_MS);
+      const res = yield fetch(embedUrl, {
+        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
+        redirect: "follow"
+      });
       const html = yield res.text();
       const unpacked = unpackEval(html) || html;
       const m = unpacked.match(/https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/i);
-      if (!m) return [];
+      if (!m) { console.log("[AhwakTV] 1Vid: no URL"); return []; }
       const url = m[0].replace(/\\\//g, "/");
-      if (!isPlausibleStreamUrl(url)) return [];
-      return [makeStream(url, "1Vid", embedUrl, /\.m3u8/i.test(url) ? "hls" : "mp4")];
+      const isHls = /\.m3u8/i.test(url);
+      console.log("[AhwakTV] 1Vid ✓");
+      return [makeStream(url, "1Vid", embedUrl, isHls ? "hls" : "mp4")];
     } catch (e) { console.log("[AhwakTV] 1Vid err:", e.message); return []; }
   });
 }
 
+// === OK.RU / OK.RU embed ===
 function resolveOkRu(embedUrl) {
+  console.log("[AhwakTV] OK.ru:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
     try {
-      const res = yield fetchWithTimeout(embedUrl, { headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }, redirect: "follow" }, RESOLVE_TIMEOUT_MS);
+      const res = yield fetch(embedUrl, {
+        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
+        redirect: "follow"
+      });
       const html = yield res.text();
+      // HLS manifest
       let m = html.match(/"hlsManifestUrl":"([^"]+)"/i);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
-        if (isPlausibleStreamUrl(url)) return [makeStream(url, "OK.ru", "https://ok.ru/", "hls")];
+        console.log("[AhwakTV] OK.ru ✓ HLS");
+        return [makeStream(url, "OK.ru", "https://ok.ru/", "hls")];
       }
+      // Direct video URL
       m = html.match(/"videoUrl":"([^"]+)"/i);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
-        if (isPlausibleStreamUrl(url)) return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
+        console.log("[AhwakTV] OK.ru ✓ MP4");
+        return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
       }
+      // legacy flashvars url720 etc
       m = html.match(/url[0-9]{3}["']?\s*[:=]\s*["']([^"']+)["']/);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
-        if (isPlausibleStreamUrl(url)) return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
+        console.log("[AhwakTV] OK.ru ✓ legacy");
+        return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
       }
+      console.log("[AhwakTV] OK.ru: no URL");
       return [];
     } catch (e) { console.log("[AhwakTV] OK.ru err:", e.message); return []; }
   });
@@ -422,65 +294,21 @@ function resolveEmbed(embedUrl) {
   return Promise.resolve([]);
 }
 
-// Resolve all embeds from a candidate — return ALL working streams.
-// mediaType/ep/primaryTitle are used to (a) find the right episode if the
-// candidate landed on the wrong one, and (b) verify — every time we trust
-// a fetched page's episode nav — that the page is actually the right show.
-function resolveCandidate(candidate, mediaType, ep, primaryTitle) {
-  return __async(this, null, function* () {
-    let targetUrl = candidate.url;
-    let watchHtml = yield get(targetUrl).catch(() => "");
-    if (!watchHtml) return [];
-
-    // For TV: if this candidate isn't the exact episode, try to find it
-    // via the season/episode nav on the page we just fetched.
-    if (mediaType === "tv" && ep) {
-      const em = candidate.title.match(/الحلق[هة]\s+([0-9\u0660-\u0669]+)/);
-      const n = em ? arabicToInt(em[1]) : null;
-      if (n !== ep) {
-        // Verify this page is actually the right show before trusting its
-        // nav — this is the key guard against leaking a different show's
-        // episode links.
-        const pageTitle = extractPageTitle(watchHtml);
-        if (!titleMatchesQuery(pageTitle, primaryTitle)) {
-          return [];
-        }
-        const eps = extractEpisodeNav(watchHtml, primaryTitle);
-        const match = eps.find(e => e.num === ep);
-        if (!match) return [];
-        targetUrl = match.url;
-        watchHtml = yield get(targetUrl, candidate.url).catch(() => "");
-        if (!watchHtml) return [];
-        // Final check: the episode page we landed on must itself carry the
-        // right show name AND the right episode number in its own title.
-        const finalTitle = extractPageTitle(watchHtml);
-        if (!titleMatchesQuery(finalTitle, primaryTitle)) return [];
-        const fem = finalTitle.match(/الحلق[هة]\s+([0-9\u0660-\u0669]+)/);
-        if (!fem || arabicToInt(fem[1]) !== ep) return [];
-      }
-    }
-
-    const seeUrl = extractSeeUrl(watchHtml);
-    if (!seeUrl) return [];
-    const seeHtml = yield get(seeUrl, targetUrl).catch(() => "");
-    if (!seeHtml) return [];
-    const embeds = extractEmbedUrls(seeHtml);
-    if (!embeds.length) return [];
-
-    // Resolve all embeds in parallel, each individually timeboxed
-    const resolved = yield Promise.all(embeds.map(e => resolveEmbed(e).catch(() => [])));
-    const streams = [];
-    const seen = new Set();
-    for (const list of resolved) {
-      for (const s of list) {
-        if (seen.has(s.url)) continue;
-        if (!isPlausibleStreamUrl(s.url)) continue;
-        seen.add(s.url);
-        streams.push(s);
-      }
-    }
-    return streams;
-  });
+function extractEpisodeList(html) {
+  const eps = [];
+  const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*)"/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const numMatch = decodeHtml(m[3]).match(/الحلقة\s+(\d+)/);
+    if (!numMatch) continue;
+    const num = parseInt(numMatch[1], 10);
+    if (eps.find(e => e.num === num)) continue;
+    let u = m[1];
+    if (u.startsWith("//")) u = "https:" + u;
+    else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
+    eps.push({ num, url: u });
+  }
+  return eps;
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
@@ -495,68 +323,105 @@ function getStreams(tmdbId, mediaType, season, episode) {
     if (!titles.length) return [];
 
     const ep = mediaType === "tv" ? Number(episode) || 1 : null;
-    const primaryTitle = titles[0] || "";
 
-    // Build queries — for TV, include episode number
+    // Build search queries
     const queries = [];
     if (mediaType === "tv") {
-      for (const t of titles) queries.push(t + " الحلقة " + ep);
+      for (const t of titles) {
+        queries.push(t + " الحلقة " + ep);
+      }
     }
     for (const t of titles) queries.push(t);
 
-    // === SPEED: fire ALL searches in parallel ===
-    const searchGroups = yield Promise.all(queries.map(q => searchSite(q).catch(() => [])));
-
-    // Merge unique
+    // Collect candidates across all queries
     const allResults = [];
     const seenVids = new Set();
-    for (const group of searchGroups) {
-      for (const r of group) {
-        if (seenVids.has(r.vid)) continue;
-        seenVids.add(r.vid);
-        allResults.push(r);
-      }
+    for (const q of queries) {
+      if (allResults.length >= 20) break;
+      try {
+        const results = yield searchSite(q);
+        for (const r of results) {
+          if (seenVids.has(r.vid)) continue;
+          seenVids.add(r.vid);
+          allResults.push(r);
+        }
+      } catch (e) { console.log("[AhwakTV] Search err:", e.message); }
     }
 
     if (!allResults.length) { console.log("[AhwakTV] No candidates"); return []; }
     console.log("[AhwakTV] Total candidates:", allResults.length);
 
-    // === Score candidates by title match ===
-    const scored = scoreCandidates(allResults, primaryTitle, mediaType, ep);
-    console.log("[AhwakTV] Top candidates:",
-      scored.slice(0, 3).map(c => `[${c.score}] ${c.title.slice(0, 40)}`).join(" | "));
+    // Sort: TV wants exact episode, movie wants فيلم
+    if (mediaType === "tv") {
+      allResults.sort((a, b) => {
+        const aM = a.title.match(/الحلقة\s+(\d+)/);
+        const bM = b.title.match(/الحلقة\s+(\d+)/);
+        const aEx = aM && parseInt(aM[1], 10) === ep ? 1 : 0;
+        const bEx = bM && parseInt(bM[1], 10) === ep ? 1 : 0;
+        return bEx - aEx;
+      });
+    } else {
+      allResults.sort((a, b) => {
+        const aF = a.title.indexOf("فيلم") !== -1 ? 1 : 0;
+        const bF = b.title.indexOf("فيلم") !== -1 ? 1 : 0;
+        return bF - aF;
+      });
+    }
 
-    // Filter: keep only candidates with strong score (>= 6) — same as
-    // original behavior. Do NOT hard-gate the pool with titleMatchesQuery
-    // here: site titles are noisy (wrapped in "مشاهدة و تحميل فيلم ..."
-    // boilerplate, transliteration variants, etc.) and a strict word-match
-    // gate at this stage was zeroing out legitimate results, which is what
-    // broke search. titleMatchesQuery is still applied later, inside
-    // resolveCandidate, where it actually matters: gating whether we trust
-    // a fetched page's episode-nav links (the actual source of the leak).
-    const strong = scored.filter(c => c.score >= 6);
-    const pool = strong.length ? strong : scored;
-    console.log("[AhwakTV] Strong matches:", strong.length, "/ Using pool of:", pool.length);
+    const streams = [];
+    const seenUrls = new Set();
+    const triedVids = new Set();
 
-    // === SPEED + reliability: race the top candidates concurrently
-    // instead of trying them one at a time. First one to produce streams
-    // wins, and we don't pay for 2-3 sequential round trips through dead
-    // mirrors anymore. ===
-    const topCandidates = pool.slice(0, 3);
-    const results = yield Promise.allSettled(
-      topCandidates.map(c => resolveCandidate(c, mediaType, ep, primaryTitle))
-    );
+    for (const result of allResults) {
+      if (streams.length >= 6) break;
+      if (triedVids.has(result.vid)) continue;
+      triedVids.add(result.vid);
 
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.status === "fulfilled" && r.value && r.value.length) {
-        console.log("[AhwakTV] ✓ " + r.value.length + " streams from " + topCandidates[i].vid);
-        return r.value;
+      try {
+        // For TV: resolve to the correct episode page
+        let targetUrl = result.url;
+        if (mediaType === "tv") {
+          const m = result.title.match(/الحلقة\s+(\d+)/);
+          const isExact = m && parseInt(m[1], 10) === ep;
+          if (!isExact) {
+            try {
+              const html = yield get(result.url);
+              const list = extractEpisodeList(html);
+              const entry = list.find(e => e.num === ep);
+              if (entry) targetUrl = entry.url;
+              else continue;
+            } catch (_) { continue; }
+          }
+        }
+
+        const watchHtml = yield get(targetUrl).catch(() => "");
+        const seeUrl = extractSeeUrl(watchHtml);
+        if (!seeUrl) continue;
+
+        const seeHtml = yield get(seeUrl, targetUrl).catch(() => "");
+        const embeds = extractEmbedUrls(seeHtml);
+        if (!embeds.length) continue;
+        console.log("[AhwakTV] " + result.vid + " embeds:", embeds.map(hostLabel).join(", "));
+
+        // Try every embed with its resolver, in parallel
+        const promises = embeds.map(e => resolveEmbed(e).catch(() => []));
+        const resolved = yield Promise.all(promises);
+        for (const list of resolved) {
+          for (const s of list) {
+            if (seenUrls.has(s.url)) continue;
+            seenUrls.add(s.url);
+            streams.push(s);
+          }
+        }
+
+        if (streams.length >= 2) break;
+      } catch (e) {
+        console.log("[AhwakTV] Candidate err:", e.message);
       }
     }
 
-    console.log("[AhwakTV] No streams found");
-    return [];
+    console.log("[AhwakTV] Final streams:", streams.length);
+    return streams;
   });
 }
 
