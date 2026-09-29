@@ -1,428 +1,1145 @@
-"use strict";
+'use strict';
 
-var __async = (__this, __arguments, generator) => {
-  return new Promise((resolve, reject) => {
-    var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } };
-    var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } };
-    var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
-    step((generator = generator.apply(__this, __arguments)).next());
-  });
+var BASE_URL = 'https://yam.ahwaktv.net';
+
+var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
+
+var USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36';
+
+var HEADERS = {
+  'User-Agent': USER_AGENT,
+  'Accept':
+    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'ar,en-US;q=0.8,en;q=0.6'
 };
 
-const USER_AGENT = "Mozilla/5.0 (Linux; Android 10, K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
-const DOMAIN = "https://yam.ahwaktv.net";
-const TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-function decodeHtml(str) {
-  return String(str)
-    .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'").replace(/&#x27;/gi, "'")
-    .replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+/* -----------------------------------------------------------
+ * BASIC HELPERS
+ * --------------------------------------------------------- */
+
+function clean(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function normalizeArabic(s) {
-  return String(s || "").replace(/[\u064B-\u065F\u0670]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+function decodeHtml(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
 }
 
-function get(url, referer) {
-  return __async(this, null, function* () {
-    const res = yield fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": referer || (DOMAIN + "/"),
-        "Accept-Language": "ar,en;q=0.9"
-      },
-      redirect: "follow"
+
+function normalizeArabic(value) {
+  return clean(decodeHtml(value))
+    .toLowerCase()
+
+    // Arabic character normalization
+    .replace(/[إأآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ء/g, '')
+    .replace(/ـ/g, '')
+
+    // Arabic / English punctuation
+    .replace(/[،؛؟ـ]/g, ' ')
+    .replace(/[()[\]{}.,:;!?'"“”‘’\-_/\\|+*=#@%^&$]/g, ' ')
+
+    // Remove common title noise
+    .replace(/\b(مسلسل|فيلم|movie|film|series|tv|episode|الحلقة)\b/gi, ' ')
+
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
+function words(value) {
+  return normalizeArabic(value)
+    .split(' ')
+    .filter(function (word) {
+      return word.length > 1;
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-    return yield res.text();
-  });
 }
 
-function tmdbTitles(tmdbId, mediaType) {
-  return __async(this, null, function* () {
-    const type = mediaType === "movie" ? "movie" : "tv";
-    const titles = [];
-    for (const lang of ["ar", "en"]) {
-      try {
-        const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=${lang}`;
-        const res = yield fetch(url);
-        if (!res.ok) continue;
-        const data = yield res.json();
-        const t = type === "movie"
-          ? (data.title || data.original_title)
-          : (data.name || data.original_name);
-        if (t && !titles.includes(t)) titles.push(t);
-      } catch (_) {}
+
+function hasArabic(value) {
+  return /[\u0600-\u06FF]/.test(String(value || ''));
+}
+
+
+function unique(values) {
+  var result = [];
+
+  values.forEach(function (value) {
+    if (!value) return;
+
+    if (result.indexOf(value) === -1) {
+      result.push(value);
     }
-    return titles;
   });
+
+  return result;
 }
 
-// Search — filters results so only titles matching the query survive
-function searchSite(query) {
-  return __async(this, null, function* () {
-    const url = `${DOMAIN}/search.php?keywords=${encodeURIComponent(query)}`;
-    console.log("[AhwakTV] Search:", query);
-    const html = yield get(url);
-    const results = [];
-    const seen = new Set();
-    const nq = normalizeArabic(query);
-    const queryWords = nq.split(/\s+/).filter(w => w.length > 1);
 
-    const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*)"/gi;
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const vid = m[2];
-      if (seen.has(vid)) continue;
-      seen.add(vid);
-      let u = m[1];
-      if (u.startsWith("//")) u = "https:" + u;
-      else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
-      const title = decodeHtml(m[3]);
+function absoluteUrl(url) {
+  if (!url) return null;
 
-      // Filter: title must contain the query or at least one query word
-      const nt = normalizeArabic(title);
-      const containsQuery = nt.indexOf(nq) !== -1;
-      const wordMatch = queryWords.length === 0 || queryWords.some(w => nt.indexOf(w) !== -1);
-      if (!containsQuery && !wordMatch) continue;
+  url = decodeHtml(url.trim());
 
-      results.push({ url: u, title, vid });
+  if (url.indexOf('//') === 0) {
+    return 'https:' + url;
+  }
+
+  if (/^https?:\/\//i.test(url)) {
+    return url;
+  }
+
+  if (url.charAt(0) === '/') {
+    return BASE_URL + url;
+  }
+
+  return BASE_URL + '/' + url;
+}
+
+
+/* -----------------------------------------------------------
+ * TITLE MATCHING
+ * --------------------------------------------------------- */
+
+function titleScore(wanted, candidate) {
+  var a = words(wanted);
+  var b = words(candidate);
+
+  if (!a.length || !b.length) {
+    return 0;
+  }
+
+  var hits = 0;
+
+  a.forEach(function (word) {
+    if (b.indexOf(word) !== -1) {
+      hits++;
+    }
+  });
+
+  var coverageWanted = hits / a.length;
+  var coverageCandidate = hits / b.length;
+
+  if (normalizeArabic(wanted) === normalizeArabic(candidate)) {
+    return 1.0;
+  }
+
+  return Math.max(
+    coverageWanted * 0.75,
+    coverageCandidate * 0.50
+  );
+}
+
+
+function rankCandidate(wantedTitles, candidateTitle, url) {
+  var best = 0;
+
+  wantedTitles.forEach(function (wanted) {
+    var score = titleScore(wanted, candidateTitle);
+
+    if (score > best) {
+      best = score;
+    }
+  });
+
+  if (hasArabic(candidateTitle)) {
+    best += 0.10;
+  }
+
+  if (/watch\.php/i.test(url)) {
+    best += 0.05;
+  }
+
+  if (/mos|series|serial/i.test(url)) {
+    best += 0.02;
+  }
+
+  return Math.min(best, 1.0);
+}
+
+
+/* -----------------------------------------------------------
+ * HTML LINK EXTRACTION
+ * --------------------------------------------------------- */
+
+function extractAnchors(html) {
+  var results = [];
+
+  var regex =
+    /<a\b([^>]*)href\s*=\s*["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
+
+  var match;
+
+  while ((match = regex.exec(html)) !== null) {
+    var attributes =
+      String(match[1] || '') +
+      ' ' +
+      String(match[3] || '');
+
+    var href = match[2];
+    var inner = match[4];
+
+    var title = clean(
+      decodeHtml(inner)
+    );
+
+    var attrTitle = '';
+
+    var titleMatch =
+      attributes.match(
+        /\b(?:title|alt|data-title)\s*=\s*["']([^"']+)["']/i
+      );
+
+    if (titleMatch) {
+      attrTitle = clean(decodeHtml(titleMatch[1]));
     }
 
-    console.log("[AhwakTV] Results:", results.length);
-    return results;
-  });
+    var finalTitle = title || attrTitle;
+
+    if (!href) continue;
+
+    results.push({
+      url: absoluteUrl(href),
+      title: finalTitle
+    });
+  }
+
+  return results;
 }
 
+
+/* -----------------------------------------------------------
+ * FETCH
+ * --------------------------------------------------------- */
+
+function fetchText(url) {
+  return fetch(url, {
+    method: 'GET',
+    headers: HEADERS
+  })
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error(
+          'HTTP ' + response.status + ' for ' + url
+        );
+      }
+
+      return response.text();
+    });
+}
+
+
+/* -----------------------------------------------------------
+ * TMDB
+ * --------------------------------------------------------- */
+
+function tmdbUrl(path, params) {
+  var query = [];
+
+  query.push(
+    'api_key=' +
+      encodeURIComponent(TMDB_API_KEY)
+  );
+
+  query.push(
+    'language=ar-SA'
+  );
+
+  Object.keys(params || {}).forEach(function (key) {
+    if (
+      params[key] !== undefined &&
+      params[key] !== null &&
+      params[key] !== ''
+    ) {
+      query.push(
+        encodeURIComponent(key) +
+          '=' +
+          encodeURIComponent(params[key])
+      );
+    }
+  });
+
+  return (
+    'https://api.themoviedb.org/3' +
+    path +
+    '?' +
+    query.join('&')
+  );
+}
+
+
+function getTMDBMovie(tmdbId) {
+  return fetch(
+    tmdbUrl('/movie/' + encodeURIComponent(tmdbId), {})
+  )
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error(
+          'TMDB movie HTTP ' + response.status
+        );
+      }
+
+      return response.json();
+    });
+}
+
+
+function getTMDBTV(tmdbId) {
+  return fetch(
+    tmdbUrl('/tv/' + encodeURIComponent(tmdbId), {})
+  )
+    .then(function (response) {
+      if (!response.ok) {
+        throw new Error(
+          'TMDB TV HTTP ' + response.status
+        );
+      }
+
+      return response.json();
+    });
+}
+
+
+/* -----------------------------------------------------------
+ * BUILD SEARCH TITLES
+ * --------------------------------------------------------- */
+
+function movieTitles(meta) {
+  return unique([
+    meta.title,
+    meta.original_title,
+    meta.name,
+    meta.original_name
+  ].filter(Boolean));
+}
+
+
+function tvTitles(meta) {
+  return unique([
+    meta.name,
+    meta.original_name,
+    meta.title,
+    meta.original_title
+  ].filter(Boolean));
+}
+
+
+/* -----------------------------------------------------------
+ * SEARCH ENDPOINTS
+ * --------------------------------------------------------- */
+
+function buildSearchUrls(title) {
+  var q = encodeURIComponent(title);
+
+  return unique([
+    BASE_URL + '/search.php?search=' + q,
+    BASE_URL + '/search.php?q=' + q,
+    BASE_URL + '/search.php?query=' + q,
+    BASE_URL + '/?s=' + q
+  ]);
+}
+
+
+function searchOneTitle(title) {
+  var urls = buildSearchUrls(title);
+
+  var index = 0;
+  var all = [];
+
+  function next() {
+    if (index >= urls.length) {
+      return Promise.resolve(all);
+    }
+
+    var url = urls[index++];
+
+    return fetchText(url)
+      .then(function (html) {
+        var anchors = extractAnchors(html);
+
+        all = all.concat(anchors);
+
+        return next();
+      })
+      .catch(function () {
+        return next();
+      });
+  }
+
+  return next();
+}
+
+
+function searchAhwak(titles) {
+  var index = 0;
+  var all = [];
+
+  function next() {
+    if (index >= titles.length) {
+      return Promise.resolve(all);
+    }
+
+    var title = titles[index++];
+
+    return searchOneTitle(title)
+      .then(function (results) {
+        all = all.concat(results);
+        return next();
+      });
+  }
+
+  return next();
+}
+
+
+/* -----------------------------------------------------------
+ * CANDIDATE FILTERING
+ * --------------------------------------------------------- */
+
+function isLikelyMoviePage(candidate) {
+  var url = candidate.url || '';
+
+  return (
+    /watch\.php/i.test(url) ||
+    /movie/i.test(url) ||
+    /film/i.test(url)
+  );
+}
+
+
+function isLikelyTVPage(candidate) {
+  var url = candidate.url || '';
+
+  return (
+    /mos/i.test(url) ||
+    /series/i.test(url) ||
+    /serial/i.test(url) ||
+    /watch\.php/i.test(url)
+  );
+}
+
+
+function chooseBestCandidate(
+  candidates,
+  titles,
+  mediaType
+) {
+  var filtered = [];
+
+  candidates.forEach(function (candidate) {
+    if (!candidate.url) return;
+    if (!candidate.title) return;
+
+    if (mediaType === 'movie') {
+      if (!isLikelyMoviePage(candidate)) {
+        return;
+      }
+    }
+
+    if (mediaType === 'tv') {
+      if (!isLikelyTVPage(candidate)) {
+        return;
+      }
+    }
+
+    var score =
+      rankCandidate(
+        titles,
+        candidate.title,
+        candidate.url
+      );
+
+    if (score < 0.70) {
+      return;
+    }
+
+    filtered.push({
+      url: candidate.url,
+      title: candidate.title,
+      score: score
+    });
+  });
+
+  filtered.sort(function (a, b) {
+    return b.score - a.score;
+  });
+
+  return filtered.length
+    ? filtered[0]
+    : null;
+}
+
+
+/* ===========================================================
+ * ===== VIDEO SOURCE EXTRACTION (ADDED) ======================
+ * ===========================================================
+ *
+ * Nothing above this line was modified.
+ * Everything below takes a VERIFIED page URL and returns
+ * Nuvio-ready stream objects.
+ * =========================================================== */
+
+/* Extract see.php URL from a watch page */
 function extractSeeUrl(html) {
-  const m = html.match(/https?:\/\/[a-z0-9.-]*\/see\.php\?vid=[A-Za-z0-9]+/i);
+  var m = html.match(/https?:\/\/[a-z0-9.-]*\/see\.php\?vid=[A-Za-z0-9]+/i);
   if (m) return m[0];
-  const m2 = html.match(/['"]((?:https?:)?\/\/[^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
-  if (m2) { let u = m2[1]; if (u.startsWith("//")) u = "https:" + u; return u; }
-  const m3 = html.match(/['"]([^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
-  if (m3) { let u = m3[1]; if (u.startsWith("//")) u = "https:" + u; else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u); return u; }
+
+  var m2 = html.match(/['"]((?:https?:)?\/\/[^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
+  if (m2) {
+    var u = m2[1];
+    if (u.indexOf('//') === 0) u = 'https:' + u;
+    return u;
+  }
+
+  var m3 = html.match(/['"]([^"']*\/see\.php\?vid=[A-Za-z0-9]+)['"]/i);
+  if (m3) {
+    var u3 = m3[1];
+    if (u3.indexOf('//') === 0) u3 = 'https:' + u3;
+    else if (!/^https?:/i.test(u3)) {
+      u3 = BASE_URL + (u3.charAt(0) === '/' ? u3 : '/' + u3);
+    }
+    return u3;
+  }
+
   return null;
 }
 
-// === FIX: extract ANY data-* attribute with an http URL, plus iframes/hrefs ===
+
+/* Extract every embed URL from see.php page */
 function extractEmbedUrls(html) {
-  const out = [];
-  const seen = new Set();
+  var out = [];
+  var seen = {};
+
   function add(u) {
-    u = decodeHtml(String(u || "").trim());
-    if (u.startsWith("//")) u = "https:" + u;
-    else if (u.startsWith("/")) u = DOMAIN + u;
-    if (!u.startsWith("http")) return;
+    u = decodeHtml(String(u || '').trim());
+
+    if (u.indexOf('//') === 0) u = 'https:' + u;
+    else if (u.charAt(0) === '/') u = BASE_URL + u;
+
+    if (!/^https?:/i.test(u)) return;
     if (/googletagmanager|google\.|facebook|histats|pamphiltre|cloudflare|adcash|monetag|propeller|popads|amazon|gstatic|jquery|w3\.org|schema\.org/i.test(u)) return;
-    if (seen.has(u)) return;
-    seen.add(u);
+
+    if (seen[u]) return;
+    seen[u] = true;
     out.push(u);
   }
-  let m;
-  // 1) iframes
-  const reIf = /<iframe[^>]*src=["']([^"']+)["']/gi;
+
+  var m;
+
+  var reIf = /<iframe[^>]*src=["']([^"']+)["']/gi;
   while ((m = reIf.exec(html)) !== null) add(m[1]);
-  // 2) ANY data-* attribute whose value starts with http (catches data-embed-url, data-src, etc)
-  const reData = /data-[a-z0-9_-]+=["'](https?:\/\/[^"']+)["']/gi;
+
+  var reData = /data-[a-z0-9_-]+=["'](https?:\/\/[^"']+)["']/gi;
   while ((m = reData.exec(html)) !== null) add(m[1]);
-  // 3) raw URLs to known hosts anywhere
-  const reAny = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com)[^"'\s<>]*/gi;
+
+  var reAny = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com)[^"'\s<>]*/gi;
   while ((m = reAny.exec(html)) !== null) add(m[0]);
+
   return out;
 }
 
+
 function hostLabel(url) {
-  const m = String(url || "").match(/^https?:\/\/(?:www\.)?([^\.\/]+)/i);
-  return m ? m[1] : "Server";
+  var m = String(url || '').match(/^https?:\/\/(?:www\.)?([^\.\/]+)/i);
+  return m ? m[1] : 'Server';
 }
 
+
 function makeStream(url, label, referer, type) {
-  if (url.startsWith("http://")) url = "https://" + url.slice(7);
-  let t = type || "iframe";
-  if (/\.m3u8/i.test(url)) t = "hls";
-  else if (/\.mp4/i.test(url)) t = "mp4";
+  if (url.indexOf('http://') === 0) url = 'https://' + url.slice(7);
+  var t = type || 'iframe';
+  if (/\.m3u8/i.test(url)) t = 'hls';
+  else if (/\.mp4/i.test(url)) t = 'mp4';
   return {
-    name: "🌙 AhwakTV",
-    title: `🌙 AhwakTV • ${label}`,
+    name: '🌙 AhwakTV',
+    title: '🌙 AhwakTV • ' + label,
     url: url,
-    quality: "Auto",
+    quality: 'Auto',
     type: t,
-    referer: referer || (DOMAIN + "/"),
-    headers: { "User-Agent": USER_AGENT, "Referer": referer || (DOMAIN + "/") }
+    referer: referer || (BASE_URL + '/'),
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Referer': referer || (BASE_URL + '/')
+    }
   };
 }
 
-// === VIDMOLY ===
+
+/* VidMoly — sources: [{ file: '...m3u8' }] */
 function resolveVidMoly(embedUrl) {
-  console.log("[AhwakTV] VidMoly:", embedUrl.slice(0, 80));
-  return __async(this, null, function* () {
-    try {
-      const res = yield fetch(embedUrl, {
-        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/", "Accept": "text/html,*/*" },
-        redirect: "follow"
-      });
-      const html = yield res.text();
-      let m = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/i);
+  return fetch(embedUrl, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Referer': BASE_URL + '/'
+    },
+    redirect: 'follow'
+  })
+    .then(function (r) { return r.text(); })
+    .then(function (html) {
+      var m = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/i);
       if (!m) m = html.match(/file\s*:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/i);
-      if (!m) { console.log("[AhwakTV] VidMoly: no m3u8"); return []; }
-      const url = m[1].replace(/\\\//g, "/");
-      console.log("[AhwakTV] VidMoly ✓");
-      return [makeStream(url, "VidMoly", "https://vidmoly.to/", "hls")];
-    } catch (e) { console.log("[AhwakTV] VidMoly err:", e.message); return []; }
-  });
+      if (!m) return [];
+      return [makeStream(m[1].replace(/\\\//g, '/'), 'VidMoly', 'https://vidmoly.to/', 'hls')];
+    })
+    .catch(function (e) {
+      console.log('[Ahwak] VidMoly err:', e.message);
+      return [];
+    });
 }
 
-// === DOODSTREAM family: playmogo, dood, uqload, ds2play, vidspeed ===
+
+/* DoodStream family: playmogo, uqload, ds2play, vidspeed */
 function resolveDood(embedUrl) {
-  console.log("[AhwakTV] Dood:", embedUrl.slice(0, 80));
-  return __async(this, null, function* () {
-    try {
-      const res = yield fetch(embedUrl, {
-        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
-        redirect: "follow"
-      });
-      const html = yield res.text();
-      const pm = html.match(/["'](\/pass_md5\/[^"']+)["']/i);
-      if (!pm) { console.log("[AhwakTV] Dood: no pass_md5"); return []; }
-      const tokenMatch = pm[1].match(/\/pass_md5\/([^\/]+)/);
-      const token = tokenMatch ? tokenMatch[1] : "";
-      const expiryMatch = html.match(/[?&]expiry=([0-9]+)/i);
-      const expiry = expiryMatch ? expiryMatch[1] : String(Math.floor(Date.now()/1000) + 3600);
-      const originMatch = embedUrl.match(/^(https?:\/\/[^\/]+)/);
-      const origin = originMatch ? originMatch[1] : "";
-      const pr = yield fetch(origin + pm[1], {
-        headers: { "User-Agent": USER_AGENT, "Referer": embedUrl },
-        redirect: "follow"
-      });
-      const base = yield pr.text();
-      if (!base || base.length < 10) { console.log("[AhwakTV] Dood: empty base"); return []; }
-      const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-      let rnd = "";
-      for (let i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
-      const finalUrl = base + rnd + "?token=" + token + "&expiry=" + expiry;
-      console.log("[AhwakTV] Dood ✓");
-      return [makeStream(finalUrl, "Dood", embedUrl, "mp4")];
-    } catch (e) { console.log("[AhwakTV] Dood err:", e.message); return []; }
-  });
+  return fetch(embedUrl, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Referer': BASE_URL + '/'
+    },
+    redirect: 'follow'
+  })
+    .then(function (r) { return r.text(); })
+    .then(function (html) {
+      var pm = html.match(/["'](\/pass_md5\/[^"']+)["']/i);
+      if (!pm) return [];
+
+      var tkMatch = pm[1].match(/\/pass_md5\/([^\/]+)/);
+      var token = tkMatch ? tkMatch[1] : '';
+      var exMatch = html.match(/[?&]expiry=([0-9]+)/i);
+      var expiry = exMatch ? exMatch[1] : String(Math.floor(Date.now() / 1000) + 3600);
+
+      var originMatch = embedUrl.match(/^(https?:\/\/[^\/]+)/);
+      var origin = originMatch ? originMatch[1] : '';
+
+      return fetch(origin + pm[1], {
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Referer': embedUrl
+        },
+        redirect: 'follow'
+      })
+        .then(function (pr) { return pr.text(); })
+        .then(function (base) {
+          if (!base || base.length < 10) return [];
+          var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+          var rnd = '';
+          for (var i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
+          return [makeStream(base + rnd + '?token=' + token + '&expiry=' + expiry, 'Dood', embedUrl, 'mp4')];
+        });
+    })
+    .catch(function (e) {
+      console.log('[Ahwak] Dood err:', e.message);
+      return [];
+    });
 }
 
-// === 1VID ===
+
+/* 1Vid — unpack eval, find m3u8/mp4 */
 function unpackEval(html) {
-  const m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
+  var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
-  let payload = m[1];
-  const base = parseInt(m[2], 10);
-  const count = parseInt(m[3], 10);
-  const kw = m[4].split("|");
-  let i = count;
+  var payload = m[1];
+  var base = parseInt(m[2], 10);
+  var count = parseInt(m[3], 10);
+  var kw = m[4].split('|');
+  var i = count;
   while (i--) {
     if (kw[i]) {
-      const pat = new RegExp("\\b" + i.toString(base) + "\\b", "g");
-      payload = payload.replace(pat, kw[i]);
+      payload = payload.replace(new RegExp('\\b' + i.toString(base) + '\\b', 'g'), kw[i]);
     }
   }
   return payload;
 }
 
+
 function resolve1Vid(embedUrl) {
-  console.log("[AhwakTV] 1Vid:", embedUrl.slice(0, 80));
-  return __async(this, null, function* () {
-    try {
-      const res = yield fetch(embedUrl, {
-        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
-        redirect: "follow"
-      });
-      const html = yield res.text();
-      const unpacked = unpackEval(html) || html;
-      const m = unpacked.match(/https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/i);
-      if (!m) { console.log("[AhwakTV] 1Vid: no URL"); return []; }
-      const url = m[0].replace(/\\\//g, "/");
-      const isHls = /\.m3u8/i.test(url);
-      console.log("[AhwakTV] 1Vid ✓");
-      return [makeStream(url, "1Vid", embedUrl, isHls ? "hls" : "mp4")];
-    } catch (e) { console.log("[AhwakTV] 1Vid err:", e.message); return []; }
-  });
+  return fetch(embedUrl, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Referer': BASE_URL + '/'
+    },
+    redirect: 'follow'
+  })
+    .then(function (r) { return r.text(); })
+    .then(function (html) {
+      var unpacked = unpackEval(html) || html;
+      var m = unpacked.match(/https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/i);
+      if (!m) return [];
+      var url = m[0].replace(/\\\//g, '/');
+      return [makeStream(url, '1Vid', embedUrl, /\.m3u8/i.test(url) ? 'hls' : 'mp4')];
+    })
+    .catch(function (e) {
+      console.log('[Ahwak] 1Vid err:', e.message);
+      return [];
+    });
 }
 
-// === OK.RU / OK.RU embed ===
+
+/* OK.ru */
 function resolveOkRu(embedUrl) {
-  console.log("[AhwakTV] OK.ru:", embedUrl.slice(0, 80));
-  return __async(this, null, function* () {
-    try {
-      const res = yield fetch(embedUrl, {
-        headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" },
-        redirect: "follow"
-      });
-      const html = yield res.text();
-      // HLS manifest
-      let m = html.match(/"hlsManifestUrl":"([^"]+)"/i);
-      if (m) {
-        const url = m[1].replace(/\\\//g, "/");
-        console.log("[AhwakTV] OK.ru ✓ HLS");
-        return [makeStream(url, "OK.ru", "https://ok.ru/", "hls")];
-      }
-      // Direct video URL
+  return fetch(embedUrl, {
+    headers: {
+      'User-Agent': USER_AGENT,
+      'Referer': BASE_URL + '/'
+    },
+    redirect: 'follow'
+  })
+    .then(function (r) { return r.text(); })
+    .then(function (html) {
+      var m = html.match(/"hlsManifestUrl":"([^"]+)"/i);
+      if (m) return [makeStream(m[1].replace(/\\\//g, '/'), 'OK.ru', 'https://ok.ru/', 'hls')];
+
       m = html.match(/"videoUrl":"([^"]+)"/i);
-      if (m) {
-        const url = m[1].replace(/\\\//g, "/");
-        console.log("[AhwakTV] OK.ru ✓ MP4");
-        return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
-      }
-      // legacy flashvars url720 etc
+      if (m) return [makeStream(m[1].replace(/\\\//g, '/'), 'OK.ru', 'https://ok.ru/', 'mp4')];
+
       m = html.match(/url[0-9]{3}["']?\s*[:=]\s*["']([^"']+)["']/);
-      if (m) {
-        const url = m[1].replace(/\\\//g, "/");
-        console.log("[AhwakTV] OK.ru ✓ legacy");
-        return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
-      }
-      console.log("[AhwakTV] OK.ru: no URL");
+      if (m) return [makeStream(m[1].replace(/\\\//g, '/'), 'OK.ru', 'https://ok.ru/', 'mp4')];
+
       return [];
-    } catch (e) { console.log("[AhwakTV] OK.ru err:", e.message); return []; }
-  });
+    })
+    .catch(function (e) {
+      console.log('[Ahwak] OK.ru err:', e.message);
+      return [];
+    });
 }
+
 
 function resolveEmbed(embedUrl) {
-  const host = hostLabel(embedUrl).toLowerCase();
-  if (host.indexOf("vidmoly") !== -1) return resolveVidMoly(embedUrl);
-  if (host.indexOf("playmogo") !== -1 || host.indexOf("dood") !== -1 ||
-      host.indexOf("uqload") !== -1 || host.indexOf("ds2play") !== -1 ||
-      host.indexOf("vidspeed") !== -1) return resolveDood(embedUrl);
-  if (host.indexOf("1vid") !== -1) return resolve1Vid(embedUrl);
-  if (host.indexOf("ok.ru") !== -1 || host.indexOf("okru") !== -1) return resolveOkRu(embedUrl);
+  var host = hostLabel(embedUrl).toLowerCase();
+  if (host.indexOf('vidmoly') !== -1) return resolveVidMoly(embedUrl);
+  if (host.indexOf('playmogo') !== -1 || host.indexOf('dood') !== -1 ||
+      host.indexOf('uqload') !== -1 || host.indexOf('ds2play') !== -1 ||
+      host.indexOf('vidspeed') !== -1) return resolveDood(embedUrl);
+  if (host.indexOf('1vid') !== -1) return resolve1Vid(embedUrl);
+  if (host.indexOf('ok.ru') !== -1 || host.indexOf('okru') !== -1) return resolveOkRu(embedUrl);
   return Promise.resolve([]);
 }
 
-function extractEpisodeList(html) {
-  const eps = [];
-  const re = /<a[^>]*href="([^"]*\/watch\.php\?vid=([A-Za-z0-9]+))"[^>]*title="([^"]*)"/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const numMatch = decodeHtml(m[3]).match(/الحلقة\s+(\d+)/);
-    if (!numMatch) continue;
-    const num = parseInt(numMatch[1], 10);
-    if (eps.find(e => e.num === num)) continue;
-    let u = m[1];
-    if (u.startsWith("//")) u = "https:" + u;
-    else if (!u.startsWith("http")) u = DOMAIN + (u.startsWith("/") ? u : "/" + u);
-    eps.push({ num, url: u });
-  }
-  return eps;
+
+/* Main: page → streams */
+function extractStreamsFromPage(pageUrl, referer) {
+  console.log('[Ahwak] Extract from:', pageUrl);
+
+  return fetchText(pageUrl)
+    .then(function (watchHtml) {
+      var seeUrl = extractSeeUrl(watchHtml);
+
+      if (!seeUrl) {
+        console.log('[Ahwak] No see.php found');
+        return [];
+      }
+
+      console.log('[Ahwak] see.php:', seeUrl);
+
+      return fetchText(seeUrl)
+        .then(function (seeHtml) {
+          var embeds = extractEmbedUrls(seeHtml);
+          console.log('[Ahwak] Embeds:', embeds.length, '[' + embeds.map(hostLabel).join(', ') + ']');
+
+          if (!embeds.length) return [];
+
+          return Promise.all(
+            embeds.map(function (e) {
+              return resolveEmbed(e).catch(function () { return []; });
+            })
+          ).then(function (groups) {
+            var streams = [];
+            var seen = {};
+
+            groups.forEach(function (group) {
+              group.forEach(function (s) {
+                if (seen[s.url]) return;
+                seen[s.url] = true;
+                streams.push(s);
+              });
+            });
+
+            console.log('[Ahwak] Streams resolved:', streams.length);
+            return streams;
+          });
+        });
+    })
+    .catch(function (e) {
+      console.log('[Ahwak] Extract error:', e.message);
+      return [];
+    });
 }
 
-function getStreams(tmdbId, mediaType, season, episode) {
-  return __async(this, null, function* () {
-    console.log("[AhwakTV] START:", tmdbId, mediaType, season, episode);
-    if (!tmdbId) return [];
-    if (mediaType !== "movie" && mediaType !== "tv") return [];
-    if (mediaType === "tv" && (!season || !episode)) return [];
 
-    const titles = yield tmdbTitles(tmdbId, mediaType);
-    console.log("[AhwakTV] Titles:", titles.join(" | "));
-    if (!titles.length) return [];
+/* -----------------------------------------------------------
+ * MOVIE RESOLUTION
+ * --------------------------------------------------------- */
 
-    const ep = mediaType === "tv" ? Number(episode) || 1 : null;
+function resolveMovie(tmdbId) {
+  return getTMDBMovie(tmdbId)
+    .then(function (meta) {
+      var titles = movieTitles(meta);
 
-    // Build search queries
-    const queries = [];
-    if (mediaType === "tv") {
-      for (const t of titles) {
-        queries.push(t + " الحلقة " + ep);
+      if (!titles.length) {
+        throw new Error(
+          'TMDB returned no usable movie title'
+        );
       }
-    }
-    for (const t of titles) queries.push(t);
 
-    // Collect candidates across all queries
-    const allResults = [];
-    const seenVids = new Set();
-    for (const q of queries) {
-      if (allResults.length >= 20) break;
-      try {
-        const results = yield searchSite(q);
-        for (const r of results) {
-          if (seenVids.has(r.vid)) continue;
-          seenVids.add(r.vid);
-          allResults.push(r);
-        }
-      } catch (e) { console.log("[AhwakTV] Search err:", e.message); }
-    }
+      console.log(
+        '[Ahwak] Movie titles: ' +
+        JSON.stringify(titles)
+      );
 
-    if (!allResults.length) { console.log("[AhwakTV] No candidates"); return []; }
-    console.log("[AhwakTV] Total candidates:", allResults.length);
+      return searchAhwak(titles)
+        .then(function (results) {
+          var candidate =
+            chooseBestCandidate(
+              results,
+              titles,
+              'movie'
+            );
 
-    // Sort: TV wants exact episode, movie wants فيلم
-    if (mediaType === "tv") {
-      allResults.sort((a, b) => {
-        const aM = a.title.match(/الحلقة\s+(\d+)/);
-        const bM = b.title.match(/الحلقة\s+(\d+)/);
-        const aEx = aM && parseInt(aM[1], 10) === ep ? 1 : 0;
-        const bEx = bM && parseInt(bM[1], 10) === ep ? 1 : 0;
-        return bEx - aEx;
-      });
-    } else {
-      allResults.sort((a, b) => {
-        const aF = a.title.indexOf("فيلم") !== -1 ? 1 : 0;
-        const bF = b.title.indexOf("فيلم") !== -1 ? 1 : 0;
-        return bF - aF;
-      });
-    }
+          if (!candidate) {
+            console.log(
+              '[Ahwak] No sufficiently strong movie match'
+            );
 
-    const streams = [];
-    const seenUrls = new Set();
-    const triedVids = new Set();
-
-    for (const result of allResults) {
-      if (streams.length >= 6) break;
-      if (triedVids.has(result.vid)) continue;
-      triedVids.add(result.vid);
-
-      try {
-        // For TV: resolve to the correct episode page
-        let targetUrl = result.url;
-        if (mediaType === "tv") {
-          const m = result.title.match(/الحلقة\s+(\d+)/);
-          const isExact = m && parseInt(m[1], 10) === ep;
-          if (!isExact) {
-            try {
-              const html = yield get(result.url);
-              const list = extractEpisodeList(html);
-              const entry = list.find(e => e.num === ep);
-              if (entry) targetUrl = entry.url;
-              else continue;
-            } catch (_) { continue; }
+            return null;
           }
-        }
 
-        const watchHtml = yield get(targetUrl).catch(() => "");
-        const seeUrl = extractSeeUrl(watchHtml);
-        if (!seeUrl) continue;
+          console.log(
+            '[Ahwak] MOVIE MATCH: ' +
+            candidate.title +
+            ' -> ' +
+            candidate.url +
+            ' score=' +
+            candidate.score
+          );
 
-        const seeHtml = yield get(seeUrl, targetUrl).catch(() => "");
-        const embeds = extractEmbedUrls(seeHtml);
-        if (!embeds.length) continue;
-        console.log("[AhwakTV] " + result.vid + " embeds:", embeds.map(hostLabel).join(", "));
+          return {
+            type: 'movie',
+            tmdbId: String(tmdbId),
+            title: candidate.title,
+            url: candidate.url,
+            score: candidate.score
+          };
+        });
+    });
+}
 
-        // Try every embed with its resolver, in parallel
-        const promises = embeds.map(e => resolveEmbed(e).catch(() => []));
-        const resolved = yield Promise.all(promises);
-        for (const list of resolved) {
-          for (const s of list) {
-            if (seenUrls.has(s.url)) continue;
-            seenUrls.add(s.url);
-            streams.push(s);
-          }
-        }
 
-        if (streams.length >= 2) break;
-      } catch (e) {
-        console.log("[AhwakTV] Candidate err:", e.message);
+/* -----------------------------------------------------------
+ * TV RESOLUTION
+ * --------------------------------------------------------- */
+
+function resolveTV(tmdbId, season, episode) {
+  return getTMDBTV(tmdbId)
+    .then(function (meta) {
+      var titles = tvTitles(meta);
+
+      if (!titles.length) {
+        throw new Error(
+          'TMDB returned no usable TV title'
+        );
       }
+
+      console.log(
+        '[Ahwak] TV titles: ' +
+        JSON.stringify(titles)
+      );
+
+      return searchAhwak(titles)
+        .then(function (results) {
+          var candidate =
+            chooseBestCandidate(
+              results,
+              titles,
+              'tv'
+            );
+
+          if (!candidate) {
+            console.log(
+              '[Ahwak] No sufficiently strong TV match'
+            );
+
+            return null;
+          }
+
+          console.log(
+            '[Ahwak] SERIES MATCH: ' +
+            candidate.title +
+            ' -> ' +
+            candidate.url +
+            ' score=' +
+            candidate.score
+          );
+
+          return fetchText(candidate.url)
+            .then(function (seriesHtml) {
+              var episodeCandidate =
+                findEpisode(
+                  seriesHtml,
+                  season,
+                  episode
+                );
+
+              if (!episodeCandidate) {
+                console.log(
+                  '[Ahwak] Series found but exact episode ' +
+                  season +
+                  'x' +
+                  episode +
+                  ' was not verified'
+                );
+
+                return null;
+              }
+
+              console.log(
+                '[Ahwak] EPISODE MATCH: ' +
+                season +
+                'x' +
+                episode +
+                ' -> ' +
+                episodeCandidate.url
+              );
+
+              return {
+                type: 'tv',
+                tmdbId: String(tmdbId),
+                title: candidate.title,
+                seriesUrl: candidate.url,
+                episodeUrl: episodeCandidate.url,
+                episodeTitle:
+                  episodeCandidate.title,
+                season: season,
+                episode: episode,
+                score: candidate.score
+              };
+            });
+        });
+    });
+}
+
+
+/* -----------------------------------------------------------
+ * EPISODE MATCHING
+ * --------------------------------------------------------- */
+
+function findEpisode(html, season, episode) {
+  var anchors = extractAnchors(html);
+
+  var seasonNumber = String(season);
+  var episodeNumber = String(episode);
+
+  var patterns = [
+    new RegExp(
+      '\\bS?0?' +
+        seasonNumber +
+        '\\s*E?0?' +
+        episodeNumber +
+        '\\b',
+      'i'
+    ),
+
+    new RegExp(
+      'الموسم\\s*' +
+        seasonNumber +
+        '[^\\d]{0,30}' +
+        'الحلق[ةه]\\s*' +
+        episodeNumber,
+      'i'
+    ),
+
+    new RegExp(
+      'season\\s*' +
+        seasonNumber +
+        '[^\\d]{0,30}' +
+        'episode\\s*' +
+        episodeNumber,
+      'i'
+    ),
+
+    new RegExp(
+      'episode\\s*' +
+        episodeNumber,
+      'i'
+    ),
+
+    new RegExp(
+      'الحلق[ةه]\\s*' +
+        episodeNumber,
+      'i'
+    )
+  ];
+
+  var matches = [];
+
+  anchors.forEach(function (anchor) {
+    var haystack =
+      normalizeArabic(anchor.title) +
+      ' ' +
+      normalizeArabic(anchor.url);
+
+    var found = false;
+
+    patterns.forEach(function (pattern) {
+      if (pattern.test(haystack)) {
+        found = true;
+      }
+    });
+
+    if (!found) {
+      return;
     }
 
-    console.log("[AhwakTV] Final streams:", streams.length);
-    return streams;
+    if (!/watch\.php/i.test(anchor.url)) {
+      return;
+    }
+
+    matches.push(anchor);
   });
+
+  if (!matches.length) {
+    return null;
+  }
+
+  matches.sort(function (a, b) {
+    var aScore =
+      /watch\.php/i.test(a.url) ? 2 : 0;
+
+    var bScore =
+      /watch\.php/i.test(b.url) ? 2 : 0;
+
+    if (
+      new RegExp(
+        '0?' + episodeNumber + '\\b'
+      ).test(a.title)
+    ) {
+      aScore++;
+    }
+
+    if (
+      new RegExp(
+        '0?' + episodeNumber + '\\b'
+      ).test(b.title)
+    ) {
+      bScore++;
+    }
+
+    return bScore - aScore;
+  });
+
+  return matches[0];
 }
 
-module.exports = { getStreams };
+
+/* -----------------------------------------------------------
+ * MAIN NUVIO ENTRY
+ * --------------------------------------------------------- */
+
+function getStreams(
+  tmdbId,
+  mediaType,
+  season,
+  episode
+) {
+  console.log(
+    '[Ahwak] Request:',
+    String(tmdbId),
+    String(mediaType),
+    String(season),
+    String(episode)
+  );
+
+  if (!tmdbId) {
+    return Promise.resolve([]);
+  }
+
+  if (mediaType === 'movie') {
+    return resolveMovie(tmdbId)
+      .then(function (resolved) {
+        if (!resolved) {
+          return [];
+        }
+
+        console.log(
+          '[Ahwak] VERIFIED MOVIE PAGE: ' +
+          resolved.url
+        );
+
+        return extractStreamsFromPage(resolved.url, BASE_URL + '/');
+      })
+      .catch(function (error) {
+        console.log(
+          '[Ahwak] Movie error: ' +
+          error.message
+        );
+
+        return [];
+      });
+  }
+
+  if (mediaType === 'tv') {
+    if (
+      season === null ||
+      season === undefined ||
+      episode === null ||
+      episode === undefined
+    ) {
+      return Promise.resolve([]);
+    }
+
+    return resolveTV(
+      tmdbId,
+      season,
+      episode
+    )
+      .then(function (resolved) {
+        if (!resolved) {
+          return [];
+        }
+
+        console.log(
+          '[Ahwak] VERIFIED EPISODE PAGE: ' +
+          resolved.episodeUrl
+        );
+
+        return extractStreamsFromPage(resolved.episodeUrl, BASE_URL + '/');
+      })
+      .catch(function (error) {
+        console.log(
+          '[Ahwak] TV error: ' +
+          error.message
+        );
+
+        return [];
+      });
+  }
+
+  return Promise.resolve([]);
+}
+
+
+module.exports = {
+  getStreams: getStreams
+};
