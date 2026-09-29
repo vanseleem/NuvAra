@@ -1,10 +1,10 @@
 var BASE = "https://aflamstream.com";
-var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+var UA = "Mozilla/5.0 (Linux; Android 10, K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
 function fetchText(url, referer) {
   url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
-  var headers = { "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" };
+  var headers = { "User-Agent": UA, "Accept": "application/json, text/html, */*" };
   if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
   return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -17,10 +17,6 @@ function decodeHtml(str) {
     .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'").replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-}
-
-function stripHtml(str) {
-  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function normalizeTitle(str) {
@@ -57,30 +53,31 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// Search via ?s=
-function searchAflam(title) {
-  var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  var url = BASE + "/?s=" + encodeURIComponent(cleanTitle);
-  console.log("[AflamStream] Search:", cleanTitle);
-  return fetchText(url, BASE + "/").then(function(html) {
+// Search via WP REST API
+function searchRest(query) {
+  var clean = String(query || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return Promise.resolve([]);
+  var url = BASE + "/wp-json/wp/v2/search?search=" + encodeURIComponent(clean) + "&per_page=10";
+  console.log("[AflamStream] REST search:", clean);
+  return fetchText(url, BASE + "/").then(function(text) {
     var results = [];
-    var seen = {};
-    // Match content links: /فيلم-xxx-2026-مترجم/12345/
-    var re = /href=["'](https?:\/\/aflamstream\.com\/[^"']*\/\d+\/?)["']/gi;
-    var m;
-    while ((m = re.exec(html)) !== null) {
-      var link = m[1];
-      if (seen[link]) continue;
-      seen[link] = 1;
-      var pm = link.match(/\/([^\/]+)\/(\d+)\/?$/);
-      var t = "";
-      if (pm) {
-        try { t = decodeURIComponent(pm[1]).replace(/[-_]+/g, " "); } catch (e) { t = pm[1]; }
+    try {
+      var data = JSON.parse(text);
+      if (Array.isArray(data)) {
+        data.forEach(function(item) {
+          if (!item || !item.id) return;
+          var title = String(item.title || "").replace(/&#8211;/g, "-").replace(/&amp;/g, "&");
+          results.push({ id: item.id, url: item.url, title: title });
+        });
       }
-      results.push({ url: link, title: t, id: pm ? pm[2] : null });
+    } catch (e) {
+      console.log("[AflamStream] REST parse error:", e.message);
     }
-    console.log("[AflamStream] Search results:", results.length);
+    console.log("[AflamStream] REST results:", results.length);
     return results;
+  }).catch(function(err) {
+    console.log("[AflamStream] REST failed:", err.message);
+    return [];
   });
 }
 
@@ -118,12 +115,18 @@ function makeStream(url, label) {
   };
 }
 
-function resolveFromWatch(watchUrl) {
+// Host name from URL: "https://rubyvidhub.com/x" -> "rubyvidhub"
+function hostLabel(url) {
+  var m = String(url || "").match(/^https?:\/\/(?:www\.)?([^\.\/]+)/i);
+  return m ? m[1] : "";
+}
+
+function resolveFromWatch(postId) {
+  var watchUrl = BASE + "/watch/?id=" + postId;
   console.log("[AflamStream] watch:", watchUrl);
   return fetchText(watchUrl, BASE + "/").then(function(html) {
     var streams = [];
     var seen = {};
-    // Extract data-url attributes (the servers list)
     var re = /data-url=["']([^"']+)["']/gi;
     var m;
     while ((m = re.exec(html)) !== null) {
@@ -133,11 +136,9 @@ function resolveFromWatch(watchUrl) {
       seen[u] = 1;
       streams.push(u);
     }
-    console.log("[AflamStream] data-url streams:", streams.length);
-    return streams.map(function(u, i) {
-      var host = "";
-      try { host = u.split("/")[2].split(".")[0]; } catch (e) {}
-      return makeStream(u, host || ("Server " + (i + 1)));
+    console.log("[AflamStream] servers:", streams.length);
+    return streams.map(function(u) {
+      return makeStream(u, hostLabel(u) || "Server");
     });
   });
 }
@@ -145,19 +146,19 @@ function resolveFromWatch(watchUrl) {
 function getMovieStreams(tmdbId) {
   return getTmdbTitles(tmdbId, "movie").then(function(titles) {
     return Promise.all(titles.map(function(t) {
-      return searchAflam(t).catch(function() { return []; });
+      return searchRest(t);
     })).then(function(groups) {
       var all = [], seen = {};
       groups.forEach(function(g) {
         g.forEach(function(r) {
-          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+          if (!seen[r.id]) { seen[r.id] = 1; all.push(r); }
         });
       });
       console.log("[AflamStream] Unique candidates:", all.length);
       if (!all.length) return [];
       var best = chooseResult(all, titles);
-      if (!best || !best.id) return [];
-      return resolveFromWatch(BASE + "/watch/?id=" + best.id);
+      if (!best) return [];
+      return resolveFromWatch(best.id);
     });
   }).catch(function(err) {
     console.log("[AflamStream] Movie error:", err.message);
@@ -174,12 +175,12 @@ function getTvStreams(tmdbId, season, episode) {
       searches.push(t);
     });
     return Promise.all(searches.map(function(q) {
-      return searchAflam(q).catch(function() { return []; });
+      return searchRest(q);
     })).then(function(groups) {
       var all = [], seen = {};
       groups.forEach(function(g) {
         g.forEach(function(r) {
-          if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
+          if (!seen[r.id]) { seen[r.id] = 1; all.push(r); }
         });
       });
       console.log("[AflamStream] TV candidates:", all.length);
@@ -189,8 +190,8 @@ function getTvStreams(tmdbId, season, episode) {
       var pool = withEp.length ? withEp : all;
       if (!pool.length) return [];
       var best = chooseResult(pool, titles);
-      if (!best || !best.id) return [];
-      return resolveFromWatch(BASE + "/watch/?id=" + best.id);
+      if (!best) return [];
+      return resolveFromWatch(best.id);
     });
   }).catch(function(err) {
     console.log("[AflamStream] TV error:", err.message);
