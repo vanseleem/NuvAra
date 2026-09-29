@@ -175,19 +175,26 @@ function scoreCandidates(results, query, mediaType, ep) {
   return scored;
 }
 
-// How many of the query's significant words actually appear in the title.
-// Used as a hard gate (separate from the scoring heuristic) so a totally
-// unrelated show can never slip through just because it picked up a few
-// generic-word points (e.g. "الجزء", "مترجم", "كامل").
+// How many of the query's significant words appear in the title. Used as
+// a soft-but-meaningful gate — specifically to stop resolveCandidate from
+// trusting a fetched page's episode-nav when that page turns out to be a
+// completely different show (the actual leak). Deliberately lenient
+// (>= 0.4, min 1 word) because site titles are noisy — wrapped in
+// "مشاهدة و تحميل فيلم ..." boilerplate, transliteration variants, word
+// order differences from TMDb's Arabic title — and the episode-number
+// check downstream is the real precision guard, not this.
 function titleMatchesQuery(title, query) {
   const nt = normalizeArabic(title);
   const nq = normalizeArabic(query).replace(/الحلق[هة]\s*[0-9\u0660-\u0669]+/g, "").trim();
   const words = nq.split(/\s+/).filter(w => w.length >= 2 &&
     !["فيلم", "مسلسل", "مترجم", "مترجمة", "كامل", "الموسم", "حلقة", "مدبلج", "مدبلجة", "الجزء"].includes(w));
-  if (!words.length) return nt.indexOf(nq) !== -1;
+  if (!words.length) return nt.indexOf(nq) !== -1 || nq.length === 0;
   const hits = words.filter(w => nt.indexOf(w) !== -1).length;
-  // require a strong majority of the real title words to be present
-  return hits / words.length >= 0.6;
+  // at least 40% of significant words present, or at least one strong
+  // (4+ char) word match — enough to rule out an unrelated show without
+  // false-rejecting legitimate title variance
+  if (hits / words.length >= 0.4) return true;
+  return words.some(w => w.length >= 4 && nt.indexOf(w) !== -1);
 }
 
 function extractSeeUrl(html) {
@@ -519,14 +526,17 @@ function getStreams(tmdbId, mediaType, season, episode) {
     console.log("[AhwakTV] Top candidates:",
       scored.slice(0, 3).map(c => `[${c.score}] ${c.title.slice(0, 40)}`).join(" | "));
 
-    // Filter: keep only candidates with strong score (>= 6), AND require
-    // the hard title-match gate — this stops a wrong-show result with a
-    // borrowed generic-word score from ever reaching resolution.
-    const strong = scored.filter(c => c.score >= 6 && titleMatchesQuery(c.title, primaryTitle));
-    const pool = strong.length ? strong : scored.filter(c => titleMatchesQuery(c.title, primaryTitle));
+    // Filter: keep only candidates with strong score (>= 6) — same as
+    // original behavior. Do NOT hard-gate the pool with titleMatchesQuery
+    // here: site titles are noisy (wrapped in "مشاهدة و تحميل فيلم ..."
+    // boilerplate, transliteration variants, etc.) and a strict word-match
+    // gate at this stage was zeroing out legitimate results, which is what
+    // broke search. titleMatchesQuery is still applied later, inside
+    // resolveCandidate, where it actually matters: gating whether we trust
+    // a fetched page's episode-nav links (the actual source of the leak).
+    const strong = scored.filter(c => c.score >= 6);
+    const pool = strong.length ? strong : scored;
     console.log("[AhwakTV] Strong matches:", strong.length, "/ Using pool of:", pool.length);
-
-    if (!pool.length) { console.log("[AhwakTV] No title-verified candidates"); return []; }
 
     // === SPEED + reliability: race the top candidates concurrently
     // instead of trying them one at a time. First one to produce streams
