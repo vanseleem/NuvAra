@@ -85,19 +85,19 @@
       "supportsExternalPlayer": true
     },
     {
-  "id": "laroza",
-  "name": "Laroza",
-  "description": "Arabic movies and series from Laroza",
-  "version": "1.0.0",
-  "author": "vanseleem",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "providers/laroza.js",
-  "enabled": true,
-  "formats": ["m3u8", "mp4"],
-  "contentLanguage": ["ar"],
-  "limited": false,
-  "supportsExternalPlayer": true
-},
+      "id": "laroza",
+      "name": "Laroza",
+      "description": "Arabic movies and series from Laroza",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/laroza.js",
+      "enabled": true,
+      "formats": ["m3u8", "mp4"],
+      "contentLanguage": ["ar"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
     {
       "id": "akwam",
       "name": "Akwam",
