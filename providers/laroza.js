@@ -217,8 +217,8 @@ function makeStream(url, label, referer) {
   }
 
   return {
-    name: "Laroza",
-    title: label ? "Laroza \u2022 " + label : "Laroza",
+    name: "⚜️ Laroza",
+    title: label ? "⚜️ Laroza \u2022 " + label : "⚜️ Laroza",
     url: url,
     quality: qualityFromUrl(url),
     referer: streamReferer,
@@ -247,8 +247,8 @@ function resolveVid(vid) {
       }
       console.log("[Laroza] No direct URL — returning embed fallback");
       return [{
-        name: "Laroza",
-        title: "Laroza (Embed)",
+        name: "⚜️ Laroza",
+        title: "⚜️ Laroza (Embed)",
         url: okhdUrl,
         quality: "Auto",
         type: "iframe",
@@ -257,8 +257,8 @@ function resolveVid(vid) {
     }).catch(function(err) {
       console.log("[Laroza] okhd failed:", err.message);
       return [{
-        name: "Laroza",
-        title: "Laroza (Embed)",
+        name: "⚜️ Laroza",
+        title: "⚜️ Laroza (Embed)",
         url: okhdUrl,
         quality: "Auto",
         type: "iframe",
