@@ -119,6 +119,14 @@ function extractEpisodeLink(html, base, wantedEpisode) {
   }
   return null;
 }
+function isVideoUrl(url) {
+  const clean2 = String(url).toLowerCase().split("?")[0].split("#")[0];
+  // Reject known non-video assets (posters/thumbnails wrongly wrapped in <source>)
+  if (/\.(jpg|jpeg|png|gif|webp|svg|ico|css|js|json|html?)$/.test(clean2)) {
+    return false;
+  }
+  return true;
+}
 function extractSources(html) {
   const sources = [];
   function add(url) {
@@ -129,6 +137,9 @@ function extractSources(html) {
       url = "https:" + url;
     }
     if (!/^https?:\/\//i.test(url)) {
+      return;
+    }
+    if (!isVideoUrl(url)) {
       return;
     }
     if (!sources.includes(url)) {
@@ -167,10 +178,10 @@ function qualityFromUrl(url) {
     return "360p";
   return "Unknown";
 }
-function makeStream(url, episode) {
+function makeStream(url, label) {
   return {
     name: "🎉 AlooyTV",
-    title: `🎉 AlooyTV \u2022 Episode ${episode}`,
+    title: `🎉 AlooyTV \u2022 ${label}`,
     url,
     quality: qualityFromUrl(url),
     headers: {
@@ -220,14 +231,21 @@ function getStreams(tmdbId, mediaType, season, episode) {
     );
     if (!tmdbId)
       return [];
-    if (mediaType !== "tv")
-      return [];
-    if (!episode)
-      return [];
-    const wantedEpisode = Number(episode);
-    if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
+
+    let wantedEpisode;
+    if (mediaType === "movie") {
+      wantedEpisode = 1;
+    } else if (mediaType === "tv") {
+      if (!episode)
+        return [];
+      wantedEpisode = Number(episode);
+      if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
+        return [];
+      }
+    } else {
       return [];
     }
+
     let titles = yield tmdbTitles(tmdbId, mediaType);
     console.log("[AlooyTV] Titles:", titles);
     if (!titles.length) {
@@ -263,6 +281,8 @@ function getStreams(tmdbId, mediaType, season, episode) {
     console.log("[AlooyTV] Watch pages:", watchPages.length);
     const streams = [];
     const seen = /* @__PURE__ */ new Set();
+    const label = mediaType === "movie" ? "Movie" : `Episode ${wantedEpisode}`;
+
     for (const watchUrl of watchPages) {
       try {
         const seriesHtml = yield get(
@@ -278,14 +298,23 @@ function getStreams(tmdbId, mediaType, season, episode) {
           `[AlooyTV] Episode ${wantedEpisode} link:`,
           episodeUrl || "NOT FOUND"
         );
-        if (!episodeUrl) {
-          continue;
+
+        let sources = [];
+        if (episodeUrl) {
+          const episodeHtml = yield get(
+            episodeUrl,
+            watchUrl
+          );
+          sources = extractSources(episodeHtml);
         }
-        const episodeHtml = yield get(
-          episodeUrl,
-          watchUrl
-        );
-        const sources = extractSources(episodeHtml);
+
+        // Fallback: no keyed link, or keyed page had nothing usable —
+        // try the base watch page itself in case the source is already there.
+        if (!sources.length) {
+          console.log("[AlooyTV] Falling back to base watch page sources");
+          sources = extractSources(seriesHtml);
+        }
+
         console.log(
           `[AlooyTV] Episode ${wantedEpisode} sources:`,
           sources.length
@@ -296,7 +325,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
           }
           seen.add(source);
           streams.push(
-            makeStream(source, wantedEpisode)
+            makeStream(source, label)
           );
         }
         if (streams.length) {
