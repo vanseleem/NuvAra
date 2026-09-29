@@ -112,7 +112,7 @@
   "version": "1.0.0",
   "author": "vanseleem",
   "supportedTypes": ["movie", "tv"],
-  "filename": "providers/q-drama.js",
+  "filename": "providers/QDrama.js",
   "enabled": true,
   "formats": ["m3u8"],
   "contentLanguage": ["ar"],
