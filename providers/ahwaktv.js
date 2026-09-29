@@ -40,21 +40,22 @@ function get(url, referer) {
   });
 }
 
+// === SPEED FIX #1: TMDB ar+en fetched in parallel ===
 function tmdbTitles(tmdbId, mediaType) {
   return __async(this, null, function* () {
     const type = mediaType === "movie" ? "movie" : "tv";
+    const langs = ["ar", "en"];
+    const responses = yield Promise.all(langs.map(lang => {
+      const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=${lang}`;
+      return fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+    }));
     const titles = [];
-    for (const lang of ["ar", "en"]) {
-      try {
-        const url = `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}&language=${lang}`;
-        const res = yield fetch(url);
-        if (!res.ok) continue;
-        const data = yield res.json();
-        const t = type === "movie"
-          ? (data.title || data.original_title)
-          : (data.name || data.original_name);
-        if (t && !titles.includes(t)) titles.push(t);
-      } catch (_) {}
+    for (const data of responses) {
+      if (!data) continue;
+      const t = type === "movie"
+        ? (data.title || data.original_title)
+        : (data.name || data.original_name);
+      if (t && !titles.includes(t)) titles.push(t);
     }
     return titles;
   });
@@ -106,7 +107,6 @@ function extractSeeUrl(html) {
   return null;
 }
 
-// === FIX: extract ANY data-* attribute with an http URL, plus iframes/hrefs ===
 function extractEmbedUrls(html) {
   const out = [];
   const seen = new Set();
@@ -121,13 +121,10 @@ function extractEmbedUrls(html) {
     out.push(u);
   }
   let m;
-  // 1) iframes
   const reIf = /<iframe[^>]*src=["']([^"']+)["']/gi;
   while ((m = reIf.exec(html)) !== null) add(m[1]);
-  // 2) ANY data-* attribute whose value starts with http (catches data-embed-url, data-src, etc)
   const reData = /data-[a-z0-9_-]+=["'](https?:\/\/[^"']+)["']/gi;
   while ((m = reData.exec(html)) !== null) add(m[1]);
-  // 3) raw URLs to known hosts anywhere
   const reAny = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com)[^"'\s<>]*/gi;
   while ((m = reAny.exec(html)) !== null) add(m[0]);
   return out;
@@ -154,7 +151,6 @@ function makeStream(url, label, referer, type) {
   };
 }
 
-// === VIDMOLY ===
 function resolveVidMoly(embedUrl) {
   console.log("[AhwakTV] VidMoly:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
@@ -174,7 +170,6 @@ function resolveVidMoly(embedUrl) {
   });
 }
 
-// === DOODSTREAM family: playmogo, dood, uqload, ds2play, vidspeed ===
 function resolveDood(embedUrl) {
   console.log("[AhwakTV] Dood:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
@@ -208,7 +203,6 @@ function resolveDood(embedUrl) {
   });
 }
 
-// === 1VID ===
 function unpackEval(html) {
   const m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
   if (!m) return null;
@@ -246,7 +240,6 @@ function resolve1Vid(embedUrl) {
   });
 }
 
-// === OK.RU / OK.RU embed ===
 function resolveOkRu(embedUrl) {
   console.log("[AhwakTV] OK.ru:", embedUrl.slice(0, 80));
   return __async(this, null, function* () {
@@ -256,21 +249,18 @@ function resolveOkRu(embedUrl) {
         redirect: "follow"
       });
       const html = yield res.text();
-      // HLS manifest
       let m = html.match(/"hlsManifestUrl":"([^"]+)"/i);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
         console.log("[AhwakTV] OK.ru ✓ HLS");
         return [makeStream(url, "OK.ru", "https://ok.ru/", "hls")];
       }
-      // Direct video URL
       m = html.match(/"videoUrl":"([^"]+)"/i);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
         console.log("[AhwakTV] OK.ru ✓ MP4");
         return [makeStream(url, "OK.ru", "https://ok.ru/", "mp4")];
       }
-      // legacy flashvars url720 etc
       m = html.match(/url[0-9]{3}["']?\s*[:=]\s*["']([^"']+)["']/);
       if (m) {
         const url = m[1].replace(/\\\//g, "/");
@@ -333,19 +323,22 @@ function getStreams(tmdbId, mediaType, season, episode) {
     }
     for (const t of titles) queries.push(t);
 
-    // Collect candidates across all queries
+    // === SPEED FIX #2: run all searches in parallel ===
+    const searchGroups = yield Promise.all(
+      queries.map(q => searchSite(q).catch(e => {
+        console.log("[AhwakTV] Search err:", e.message);
+        return [];
+      }))
+    );
+
     const allResults = [];
     const seenVids = new Set();
-    for (const q of queries) {
-      if (allResults.length >= 20) break;
-      try {
-        const results = yield searchSite(q);
-        for (const r of results) {
-          if (seenVids.has(r.vid)) continue;
-          seenVids.add(r.vid);
-          allResults.push(r);
-        }
-      } catch (e) { console.log("[AhwakTV] Search err:", e.message); }
+    for (const group of searchGroups) {
+      for (const r of group) {
+        if (seenVids.has(r.vid)) continue;
+        seenVids.add(r.vid);
+        allResults.push(r);
+      }
     }
 
     if (!allResults.length) { console.log("[AhwakTV] No candidates"); return []; }
@@ -378,7 +371,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
       triedVids.add(result.vid);
 
       try {
-        // For TV: resolve to the correct episode page
         let targetUrl = result.url;
         if (mediaType === "tv") {
           const m = result.title.match(/الحلقة\s+(\d+)/);
@@ -403,7 +395,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
         if (!embeds.length) continue;
         console.log("[AhwakTV] " + result.vid + " embeds:", embeds.map(hostLabel).join(", "));
 
-        // Try every embed with its resolver, in parallel
         const promises = embeds.map(e => resolveEmbed(e).catch(() => []));
         const resolved = yield Promise.all(promises);
         for (const list of resolved) {
