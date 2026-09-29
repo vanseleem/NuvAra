@@ -104,6 +104,20 @@
       "contentLanguage": ["ar"],
       "limited": false,
       "supportsExternalPlayer": true
-    }
+    },
+    {
+  "id": "q-drama",
+  "name": "q-drama",
+  "description": "Arabic and international drama streaming",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/q-drama.js",
+  "enabled": true,
+  "formats": ["m3u8"],
+  "contentLanguage": ["ar"],
+  "limited": false,
+  "supportsExternalPlayer": true
+}
   ]
 }
