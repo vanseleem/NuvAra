@@ -167,10 +167,10 @@ function qualityFromUrl(url) {
     return "360p";
   return "Unknown";
 }
-function makeStream(url, label) {
+function makeStream(url, episode) {
   return {
     name: "🎉 AlooyTV",
-    title: `🎉 AlooyTV \u2022 ${label}`,
+    title: `🎉 AlooyTV \u2022 Episode ${episode}`,
     url,
     quality: qualityFromUrl(url),
     headers: {
@@ -220,23 +220,14 @@ function getStreams(tmdbId, mediaType, season, episode) {
     );
     if (!tmdbId)
       return [];
-
-    // Movies on this site are stored as 1-episode series (labelled "Ep#1").
-    // TV keeps its normal episode requirement; movies always target episode 1.
-    let wantedEpisode;
-    if (mediaType === "movie") {
-      wantedEpisode = 1;
-    } else if (mediaType === "tv") {
-      if (!episode)
-        return [];
-      wantedEpisode = Number(episode);
-      if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
-        return [];
-      }
-    } else {
+    if (mediaType !== "tv")
+      return [];
+    if (!episode)
+      return [];
+    const wantedEpisode = Number(episode);
+    if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
       return [];
     }
-
     let titles = yield tmdbTitles(tmdbId, mediaType);
     console.log("[AlooyTV] Titles:", titles);
     if (!titles.length) {
@@ -278,8 +269,6 @@ function getStreams(tmdbId, mediaType, season, episode) {
           watchUrl,
           DOMAIN + "/"
         );
-        // Same two-hop flow for both movie and tv: base page -> keyed episode
-        // page (via Ep#N anchor) -> real <source> on that keyed page.
         const episodeUrl = extractEpisodeLink(
           seriesHtml,
           watchUrl,
@@ -301,14 +290,13 @@ function getStreams(tmdbId, mediaType, season, episode) {
           `[AlooyTV] Episode ${wantedEpisode} sources:`,
           sources.length
         );
-        const label = mediaType === "movie" ? "Movie" : `Episode ${wantedEpisode}`;
         for (const source of sources) {
           if (seen.has(source)) {
             continue;
           }
           seen.add(source);
           streams.push(
-            makeStream(source, label)
+            makeStream(source, wantedEpisode)
           );
         }
         if (streams.length) {
