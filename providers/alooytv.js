@@ -1,8 +1,20 @@
 "use strict";
 var __async = (__this, __arguments, generator) => {
   return new Promise((resolve, reject) => {
-    var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } };
-    var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } };
+    var fulfilled = (value) => {
+      try {
+        step(generator.next(value));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    var rejected = (value) => {
+      try {
+        step(generator.throw(value));
+      } catch (e) {
+        reject(e);
+      }
+    };
     var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
     step((generator = generator.apply(__this, __arguments)).next());
   });
@@ -10,40 +22,12 @@ var __async = (__this, __arguments, generator) => {
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 const DOMAIN = "https://dm.alooytv16.xyz";
 const TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
-
 function decodeHtml(str) {
   return String(str).replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&#x27;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
 }
-
-// === Base64 decoder that works without atob ===
-function b64decode(input) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-  let str = String(input).replace(/[^A-Za-z0-9+/=]/g, "");
-  let output = "";
-  for (let i = 0; i < str.length; i += 4) {
-    const c1 = chars.indexOf(str[i]);
-    const c2 = chars.indexOf(str[i + 1]);
-    const c3 = chars.indexOf(str[i + 2]);
-    const c4 = chars.indexOf(str[i + 3]);
-    const b1 = (c1 << 2) | (c2 >> 4);
-    const b2 = ((c2 & 15) << 4) | (c3 >> 2);
-    const b3 = ((c3 & 3) << 6) | c4;
-    output += String.fromCharCode(b1);
-    if (c3 !== 64) output += String.fromCharCode(b2);
-    if (c4 !== 64) output += String.fromCharCode(b3);
-  }
-  try {
-    return decodeURIComponent(escape(output));
-  } catch (_) {
-    return output;
-  }
+function clean(str) {
+  return decodeHtml(String(str || "")).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
-
-function isPlaceholder(url) {
-  // vid0.0, vid1.0, vid9.0, etc. — anything matching vid\d+.0 with no real host
-  return /^https?:\/\/vid\d+\.0\/?$/i.test(String(url).trim());
-}
-
 function get(_0) {
   return __async(this, arguments, function* (url, referer = DOMAIN + "/") {
     const res = yield fetch(url, {
@@ -54,15 +38,19 @@ function get(_0) {
       },
       redirect: "follow"
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} for ${url}`);
+    }
     return yield res.text();
   });
 }
-
 function absoluteUrl(value, base) {
   const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (/^https?:\/\//i.test(raw)) return raw;
+  if (!raw)
+    return "";
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
   if (raw.startsWith("//")) {
     const schemeMatch = String(base).match(/^https?:/i);
     return (schemeMatch ? schemeMatch[0] : "https:") + raw;
@@ -73,24 +61,32 @@ function absoluteUrl(value, base) {
   }
   const cleanBase = String(base).split("?")[0].split("#")[0];
   const slash = cleanBase.lastIndexOf("/");
-  if (slash >= 0) return cleanBase.slice(0, slash + 1) + raw;
+  if (slash >= 0) {
+    return cleanBase.slice(0, slash + 1) + raw;
+  }
   return raw;
 }
-
 function extractWatchLinks(html, base) {
   const out = [];
   const re = /href\s*=\s*["']([^"']+)["']/gi;
   let m;
   while ((m = re.exec(html)) !== null) {
     let href = decodeHtml(m[1]).trim();
-    if (!href) continue;
-    try { href = absoluteUrl(href, base); } catch (_) { continue; }
-    if (!/\/watch\//i.test(href)) continue;
-    if (!out.includes(href)) out.push(href);
+    if (!href)
+      continue;
+    try {
+      href = absoluteUrl(href, base);
+    } catch (_) {
+      continue;
+    }
+    if (!/\/watch\//i.test(href))
+      continue;
+    if (!out.includes(href)) {
+      out.push(href);
+    }
   }
   return out;
 }
-
 function extractEpisodeLink(html, base, wantedEpisode) {
   const wanted = Number(wantedEpisode);
   const anchorRe = /<a\b[^>]*>[\s\S]*?<\/a>/gi;
@@ -98,102 +94,119 @@ function extractEpisodeLink(html, base, wantedEpisode) {
   while ((anchor = anchorRe.exec(html)) !== null) {
     const tag = anchor[0];
     const hrefMatch = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i);
-    if (!hrefMatch) continue;
+    if (!hrefMatch)
+      continue;
     const episodeMatch = tag.match(/Ep\s*#\s*(\d+)/i);
-    if (!episodeMatch) continue;
+    if (!episodeMatch)
+      continue;
     const ep = Number(episodeMatch[1]);
-    if (ep !== wanted) continue;
+    if (ep !== wanted)
+      continue;
     const rawHref = decodeHtml(hrefMatch[1]).trim();
-    if (!rawHref) continue;
+    if (!rawHref)
+      continue;
     let absolute;
-    try { absolute = absoluteUrl(rawHref, base); } catch (_) { continue; }
-    if (!/\/watch\//i.test(absolute)) continue;
-    if (!/[?&]key=/i.test(absolute)) continue;
+    try {
+      absolute = absoluteUrl(rawHref, base);
+    } catch (_) {
+      continue;
+    }
+    if (!/\/watch\//i.test(absolute))
+      continue;
+    if (!/[?&]key=/i.test(absolute))
+      continue;
     return absolute;
   }
   return null;
 }
-
-function extractAnyKeyLink(html, base) {
-  const re = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const rawHref = decodeHtml(m[1]).trim();
-    if (!rawHref) continue;
-    if (!/[?&]key=/i.test(rawHref)) continue;
-    if (!/\/watch\//i.test(rawHref)) continue;
-    let absolute;
-    try { absolute = absoluteUrl(rawHref, base); } catch (_) { continue; }
-    return absolute;
+function extractKeyLink(html, base) {
+  const re = /href\s*=\s*["']([^"']*\/watch\/[^"']*\?key=[^"']+)["']/i;
+  const m = html.match(re);
+  if (!m)
+    return null;
+  let absolute;
+  try {
+    absolute = absoluteUrl(decodeHtml(m[1]).trim(), base);
+  } catch (_) {
+    return null;
   }
-  return null;
+  return absolute;
 }
-
 function extractSources(html) {
   const sources = [];
   function add(url) {
-    if (!url) return;
+    if (!url)
+      return;
     url = decodeHtml(url).trim();
-    if (url.startsWith("//")) url = "https:" + url;
-    if (!/^https?:\/\//i.test(url)) return;
-    if (isPlaceholder(url)) return;   // <-- THE FIX: catch vid6.0, vid9.0, etc.
-    if (!sources.includes(url)) sources.push(url);
+    if (url.startsWith("//")) {
+      url = "https:" + url;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      return;
+    }
+    if (/^https?:\/\/vid\d+\.0\/?$/i.test(url)) {
+      return;
+    }
+    if (!sources.includes(url)) {
+      sources.push(url);
+    }
   }
   const sourceRe = /<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
   let m;
-  while ((m = sourceRe.exec(html)) !== null) add(m[1]);
-
-  // Fallback: decode download_video.php base64 params
-  const dlRe = /download_video\.php\?video_url=([A-Za-z0-9+/=]+)/gi;
-  while ((m = dlRe.exec(html)) !== null) {
-    try {
-      const decoded = b64decode(m[1]);
-      if (decoded && /^https?:\/\//i.test(decoded)) add(decoded);
-    } catch (_) {}
+  while ((m = sourceRe.exec(html)) !== null) {
+    add(m[1]);
   }
-
   const unique = [];
-  const seenPaths = new Set();
+  const seenPaths = /* @__PURE__ */ new Set();
   for (const url of sources) {
     const key = String(url).split("?")[0].split("#")[0];
-    if (seenPaths.has(key)) continue;
+    if (seenPaths.has(key))
+      continue;
     seenPaths.add(key);
     unique.push(url);
   }
   return unique;
 }
-
 function qualityFromUrl(url) {
   const s = String(url).toLowerCase();
-  if (/2160|4k/.test(s)) return "4K";
-  if (/1440/.test(s)) return "1440p";
-  if (/1080/.test(s)) return "1080p";
-  if (/720/.test(s)) return "720p";
-  if (/480/.test(s)) return "480p";
-  if (/360/.test(s)) return "360p";
+  if (/2160|4k/.test(s))
+    return "4K";
+  if (/1440/.test(s))
+    return "1440p";
+  if (/1080/.test(s))
+    return "1080p";
+  if (/720/.test(s))
+    return "720p";
+  if (/480/.test(s))
+    return "480p";
+  if (/360/.test(s))
+    return "360p";
   return "Unknown";
 }
-
 function makeStream(url, episode) {
   return {
     name: "🎉 AlooyTV",
     title: `🎉 AlooyTV \u2022 Episode ${episode}`,
     url,
     quality: qualityFromUrl(url),
-    headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Referer": DOMAIN + "/"
+    }
   };
 }
-
-function makeMovieStream(url, movieTitle) {
+function makeMovieStream(url, title) {
   return {
     name: "🎉 AlooyTV",
-    title: movieTitle ? `🎉 AlooyTV \u2022 ${movieTitle}` : "🎉 AlooyTV",
+    title: title ? `🎉 AlooyTV \u2022 ${title}` : "🎉 AlooyTV",
     url,
     quality: qualityFromUrl(url),
-    headers: { "User-Agent": USER_AGENT, "Referer": DOMAIN + "/" }
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Referer": DOMAIN + "/"
+    }
   };
 }
-
 function tmdbTitles(tmdbId, mediaType) {
   return __async(this, null, function* () {
     const type = mediaType === "movie" ? "movie" : "tv";
@@ -203,111 +216,166 @@ function tmdbTitles(tmdbId, mediaType) {
       try {
         const apiUrl = "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) + "?api_key=" + TMDB_API_KEY + "&language=" + lang;
         const res = yield fetch(apiUrl);
-        if (!res.ok) continue;
+        if (!res.ok)
+          continue;
         const data = yield res.json();
-        const title = type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name);
-        if (title && !titles.includes(title)) titles.push(title);
-      } catch (_) {}
+        const title = type === "movie" ? data.title || data.original_title : data.name || data.original_name;
+        if (title && !titles.includes(title))
+          titles.push(title);
+      } catch (_) {
+      }
     }
     return titles;
   });
 }
-
 function searchAlooy(title) {
   return __async(this, null, function* () {
-    if (!title) return [];
+    if (!title)
+      return [];
     const url = `${DOMAIN}/search?q=${encodeURIComponent(title)}`;
     const html = yield get(url, DOMAIN + "/");
     return extractWatchLinks(html, url);
   });
 }
-
 function getStreams(tmdbId, mediaType, season, episode) {
   return __async(this, null, function* () {
-    console.log("[AlooyTV] Request:", tmdbId, mediaType, season, episode);
-    if (!tmdbId) return [];
-    if (mediaType !== "movie" && mediaType !== "tv") return [];
+    console.log(
+      "[AlooyTV] Request:",
+      tmdbId,
+      mediaType,
+      season,
+      episode
+    );
+    if (!tmdbId)
+      return [];
+    if (mediaType !== "movie" && mediaType !== "tv")
+      return [];
 
-    const wantedEpisode = mediaType === "tv" ? Number(episode) : null;
-    if (mediaType === "tv") {
-      if (!episode) return [];
-      if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) return [];
+    const isMovie = mediaType === "movie";
+    const wantedEpisode = isMovie ? null : Number(episode);
+    if (!isMovie) {
+      if (!episode)
+        return [];
+      if (!Number.isFinite(wantedEpisode) || wantedEpisode < 1) {
+        return [];
+      }
     }
 
     let titles = yield tmdbTitles(tmdbId, mediaType);
     console.log("[AlooyTV] Titles:", titles);
-    if (!titles.length) titles = [String(tmdbId)];
+    if (!titles.length) {
+      titles = [String(tmdbId)];
+    }
 
     const watchPages = [];
     for (const title of titles) {
       try {
         const found = yield searchAlooy(title);
-        console.log("[AlooyTV] Search:", title, "=>", found.length, "watch links");
+        console.log(
+          "[AlooyTV] Search:",
+          title,
+          "=>",
+          found.length,
+          "watch links"
+        );
         for (const link of found) {
-          if (!watchPages.includes(link)) watchPages.push(link);
+          if (!watchPages.includes(link)) {
+            watchPages.push(link);
+          }
         }
-        if (found.length) break;
+        if (found.length) {
+          break;
+        }
       } catch (e) {
-        console.log("[AlooyTV] Search failed:", title, e.message);
+        console.log(
+          "[AlooyTV] Search failed:",
+          title,
+          e.message
+        );
       }
     }
     console.log("[AlooyTV] Watch pages:", watchPages.length);
 
     const streams = [];
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
 
-    if (mediaType === "movie") {
-      for (const watchUrl of watchPages) {
-        try {
+    for (const watchUrl of watchPages) {
+      try {
+        if (isMovie) {
           const baseHtml = yield get(watchUrl, DOMAIN + "/");
-          let sources = extractSources(baseHtml);
-          console.log("[AlooyTV] Movie base sources:", sources.length);
-
-          if (!sources.length) {
-            const keyUrl = extractAnyKeyLink(baseHtml, watchUrl);
-            console.log("[AlooyTV] Movie key link:", keyUrl || "NOT FOUND");
-            if (keyUrl) {
-              const keyedHtml = yield get(keyUrl, watchUrl);
-              sources = extractSources(keyedHtml);
-              console.log("[AlooyTV] Movie keyed sources:", sources.length);
-            }
+          const keyUrl = extractKeyLink(baseHtml, watchUrl);
+          console.log("[AlooyTV] Movie key URL:", keyUrl || "NOT FOUND");
+          if (!keyUrl) {
+            continue;
           }
-
+          const keyedHtml = yield get(keyUrl, watchUrl);
+          const sources = extractSources(keyedHtml);
+          console.log("[AlooyTV] Movie sources:", sources.length);
           for (const source of sources) {
-            if (seen.has(source)) continue;
+            if (seen.has(source)) {
+              continue;
+            }
             seen.add(source);
             streams.push(makeMovieStream(source, titles[0]));
           }
-          if (streams.length) break;
-        } catch (e) {
-          console.log("[AlooyTV] Movie watch failed:", watchUrl, e.message);
-        }
-      }
-    } else {
-      for (const watchUrl of watchPages) {
-        try {
-          const seriesHtml = yield get(watchUrl, DOMAIN + "/");
-          const episodeUrl = extractEpisodeLink(seriesHtml, watchUrl, wantedEpisode);
-          console.log(`[AlooyTV] Episode ${wantedEpisode} link:`, episodeUrl || "NOT FOUND");
-          if (!episodeUrl) continue;
-          const episodeHtml = yield get(episodeUrl, watchUrl);
-          const sources = extractSources(episodeHtml);
-          console.log(`[AlooyTV] Episode ${wantedEpisode} sources:`, sources.length);
-          for (const source of sources) {
-            if (seen.has(source)) continue;
-            seen.add(source);
-            streams.push(makeStream(source, wantedEpisode));
+          if (streams.length) {
+            break;
           }
-          if (streams.length) break;
-        } catch (e) {
-          console.log("[AlooyTV] Watch/episode failed:", watchUrl, e.message);
+        } else {
+          const seriesHtml = yield get(
+            watchUrl,
+            DOMAIN + "/"
+          );
+          const episodeUrl = extractEpisodeLink(
+            seriesHtml,
+            watchUrl,
+            wantedEpisode
+          );
+          console.log(
+            `[AlooyTV] Episode ${wantedEpisode} link:`,
+            episodeUrl || "NOT FOUND"
+          );
+          if (!episodeUrl) {
+            continue;
+          }
+          const episodeHtml = yield get(
+            episodeUrl,
+            watchUrl
+          );
+          const sources = extractSources(episodeHtml);
+          console.log(
+            `[AlooyTV] Episode ${wantedEpisode} sources:`,
+            sources.length
+          );
+          for (const source of sources) {
+            if (seen.has(source)) {
+              continue;
+            }
+            seen.add(source);
+            streams.push(
+              makeStream(source, wantedEpisode)
+            );
+          }
+          if (streams.length) {
+            break;
+          }
         }
+      } catch (e) {
+        console.log(
+          "[AlooyTV] Watch failed:",
+          watchUrl,
+          e.message
+        );
       }
     }
 
-    console.log("[AlooyTV] Final streams:", streams.length);
+    console.log(
+      "[AlooyTV] Final streams:",
+      streams.length
+    );
     return streams;
   });
 }
-
-module.exports = { getStreams };
+module.exports = {
+  getStreams
+};
