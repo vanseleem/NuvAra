@@ -85,20 +85,6 @@
       "supportsExternalPlayer": true
     },
     {
-  "id": "fostatv",
-  "name": "FostaTV",
-  "description": "Arabic movies and series",
-  "version": "1.0.0",
-  "author": "vanseleem",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "providers/fostatv.js",
-  "enabled": true,
-  "formats": ["iframe", "mp4", "m3u8"],
-  "contentLanguage": ["ar"],
-  "limited": false,
-  "supportsExternalPlayer": true
-},
-    {
       "id": "dramacafe",
       "name": "DramaCafe",
       "description": "Arabic movies and series from DramaCafe",
@@ -151,6 +137,20 @@
   "enabled": true,
   "formats": ["mp4", "m3u8"],
   "contentLanguage": ["ar", "en", "tr"],
+  "limited": false,
+  "supportsExternalPlayer": true
+},
+{
+  "id": "fostatv",
+  "name": "FostaTV",
+  "description": "Arabic movies and series",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/fostatv.js",
+  "enabled": true,
+  "formats": ["iframe", "mp4", "m3u8"],
+  "contentLanguage": ["ar"],
   "limited": false,
   "supportsExternalPlayer": true
 },
