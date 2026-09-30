@@ -259,8 +259,8 @@ function resolveVid(vid) {
       }
       console.log("[DramaCafe] No direct URL — returning embed fallback");
       return [{
-        name: "⚜️ DramaCafe",
-        title: "⚜️ DramaCafe (Embed)",
+        name: "☕ DramaCafe",
+        title: "☕ DramaCafe (Embed)",
         url: playerUrl,
         quality: "Auto",
         type: "iframe",
@@ -269,8 +269,8 @@ function resolveVid(vid) {
     }).catch(function(err) {
       console.log("[DramaCafe] player failed:", err.message);
       return [{
-        name: "⚜️ DramaCafe",
-        title: "⚜️ DramaCafe (Embed)",
+        name: "☕ DramaCafe",
+        title: "☕ DramaCafe (Embed)",
         url: playerUrl,
         quality: "Auto",
         type: "iframe",
