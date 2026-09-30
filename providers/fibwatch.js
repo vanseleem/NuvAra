@@ -122,13 +122,11 @@ function buildMeta(data, type) {
 }
 
 // ───────────────────────── Search ────────────────────────────────────
+// FIXED: regex now matches BOTH relative and absolute /watch/ URLs
 
-// Fibwatch search results are inside page_loading.php output
-// URL pattern: /?link1=search&keyword={q} or /page_loading.php?link1=search&keyword={q}
 function parseSearchResults(html) {
   var results = [], seen = {};
-  // Match: href="/watch/{slug}.html" ... >Title</a>
-  var re = /<a\s+href="(\/watch\/[^"]+\.html)"[^>]*>([^<]{2,200})<\/a>/gi;
+  var re = /<a\s+href="((?:https?:\/\/[^"]+)?\/watch\/[^"]+\.html)"[^>]*>([^<]{2,200})<\/a>/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
     var url = absoluteUrl(decodeEntities(m[1]), BASE_URL);
@@ -141,7 +139,6 @@ function parseSearchResults(html) {
 }
 
 function searchSite(query) {
-  // Use the AJAX page_loading endpoint which returns raw HTML
   var url = BASE_URL + '/page_loading.php?link1=search&keyword=' + encodeURIComponent(query);
   log('Search: ' + query);
   return siteGet(url, BASE_URL + '/').then(function (html) {
@@ -253,7 +250,6 @@ function unpackAll(text) {
 
 function resolveWatchPage(watchUrl, title) {
   return siteGet(watchUrl, BASE_URL + '/').then(function (html) {
-    // Gather all text to scan: raw HTML + unpacked scripts
     var texts = [html].concat(unpackAll(html));
     var urls = [];
     texts.forEach(function (t) {
@@ -303,8 +299,19 @@ function resolveWatchPage(watchUrl, title) {
       });
     }
 
-    log('no stream found on watch page');
-    return [];
+    // Second fallback: return the watch page itself for external playback
+    log('no stream found — returning watch page as fallback');
+    return [{
+      name: PROVIDER_NAME + ' (page)',
+      title: title,
+      url: watchUrl,
+      quality: 'Auto',
+      size: 'Unknown',
+      type: 'iframe',
+      headers: { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/' },
+      behaviorHints: { notWebReady: true },
+      provider: PROVIDER_ID
+    }];
   });
 }
 
@@ -333,7 +340,6 @@ function getMovieStreams(meta, title) {
 
 function getTvStreams(meta, season, episode, title) {
   var all = [], seen = {}, qi = 0;
-  // Build TV-aware queries: "Title S01E04", "Title Season 1 Episode 4", "Title"
   var queries = [];
   meta.titles.slice(0, 2).forEach(function (t) {
     queries.push(t + ' S' + pad2(season) + 'E' + pad2(episode));
@@ -350,7 +356,6 @@ function getTvStreams(meta, season, episode, title) {
   return next().then(function () {
     log('tv candidates: ' + all.length);
     if (!all.length) return [];
-    // Prefer results containing the episode number
     var epRe = new RegExp('(?:S0?' + season + '\\s*E0?' + episode + '|Season\\s*' + season + '.*Episode\\s*' + episode + '|' + season + 'x0?' + episode + ')', 'i');
     var withEp = all.filter(function (r) { return epRe.test(r.title); });
     var pool = withEp.length ? withEp : all;
