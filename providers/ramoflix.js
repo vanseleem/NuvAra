@@ -4,6 +4,8 @@ var PROVIDER_NAME = "🎬 RamoFlix";
 
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 var SITE_TIMEOUT = 15000;
+var EMBED_TIMEOUT = 10000;
+var M3U8_TIMEOUT = 6000;
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 
 function log(m) { console.log("[RamoFlix] " + m); }
@@ -72,6 +74,46 @@ function fetchTmdb(tmdbId, type) {
     "?api_key=" + TMDB_API_KEY + "&language=en";
   return fetchText(url, { "Accept": "application/json" }).then(JSON.parse);
 }
+
+// ───────────────────────────── URL helpers ─────────────────────────────
+
+function flatten(groups) { return [].concat.apply([], groups); }
+
+function originOf(url) {
+  var m = /^(https?:\/\/[^\/?#]+)/i.exec(url);
+  return m ? m[1] : "";
+}
+
+function absoluteUrl(url, baseUrl) {
+  var u = decodeHtml(url).trim();
+  if (/^https?:\/\//i.test(u)) return u;
+  if (u.indexOf("//") === 0) return "https:" + u;
+  if (u.charAt(0) === "/") return originOf(baseUrl) + u;
+  return "";
+}
+
+function resolveRelative(rel, baseUrl) {
+  if (/^https?:\/\//i.test(rel)) return rel;
+  if (rel.indexOf("//") === 0) return "https:" + rel;
+  if (rel.charAt(0) === "/") return originOf(baseUrl) + rel;
+  var clean = baseUrl.split("?")[0].split("#")[0];
+  return clean.substring(0, clean.lastIndexOf("/") + 1) + rel;
+}
+
+function cleanMediaUrl(url) {
+  return String(url)
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&")
+    .trim();
+}
+
+function qualityFromUrl(url) {
+  var m = /(\d{3,4})p\b/i.exec(url);
+  return m ? m[1] + "p" : null;
+}
+
+// ───────────────────────────── Site search ─────────────────────────────
 
 function parseSearchResults(html) {
   var results = [];
@@ -146,22 +188,175 @@ function extractTvServerLabels(html) {
   return labels;
 }
 
-function buildStreams(embedUrls, title, serverLabels) {
-  var streams = [];
-  embedUrls.forEach(function (item) {
-    streams.push({
-      name: PROVIDER_NAME + " " + item.label + " (Auto)",
-      title: title + " - " + item.label,
-      url: item.url,
-      quality: "Auto",
-      size: "Unknown",
-      type: "iframe",
-      headers: { "User-Agent": UA, "Referer": BASE + "/" },
-      provider: PROVIDER_ID
-    });
+// ─────────────────────── Embed -> real stream resolver ─────────────────────
+
+// Dean Edwards p.a.c.k.e.r unpacker (some embed hosts hide their m3u8 in it).
+function unpackAll(text) {
+  var out = [];
+  if (text.indexOf("p,a,c,k,e") === -1) return out;
+  var digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  var patterns = [
+    /\}\(\s*'((?:[^'\\]|\\[\s\S])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\[\s\S])*)'\s*\.split\(\s*'\|'\s*\)/g,
+    /\}\(\s*"((?:[^"\\]|\\[\s\S])*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"((?:[^"\\]|\\[\s\S])*)"\s*\.split\(\s*"\|"\s*\)/g
+  ];
+  patterns.forEach(function (re) {
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var radix = parseInt(m[2], 10);
+      var words = m[4].split("|");
+      var payload = m[1].replace(/\\\\/g, "\\").replace(/\\'/g, "'").replace(/\\"/g, '"');
+      out.push(payload.replace(/\b\w+\b/g, function (w) {
+        var n = 0;
+        for (var i = 0; i < w.length; i++) {
+          var d = digits.indexOf(w.charAt(i));
+          if (d < 0 || d >= radix) return w;
+          n = n * radix + d;
+        }
+        return words[n] ? words[n] : w;
+      }));
+    }
   });
-  return streams;
+  return out;
 }
+
+var BAD_ASSET = /\.(?:jpe?g|png|gif|webp|vtt|srt|css|js|json|html?)(?:[?#]|$)/i;
+
+function scanMediaUrls(text, baseUrl) {
+  var patterns = [
+    /sources\s*:\s*\[\s*\{\s*["']?file["']?\s*:\s*["']([^"']+)["']/gi,
+    /sources\s*:\s*\[\s*["']([^"']+)["']/gi,
+    /["']?file["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi,
+    /["']hls\d*["']\s*:\s*["']([^"']+)["']/gi,
+    /["'](https?:\\?\/\\?\/[^"'\s]+?\.(?:m3u8|mp4)[^"'\s]*)["']/gi
+  ];
+  var found = [];
+  var seen = {};
+  patterns.forEach(function (re) {
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var url = absoluteUrl(cleanMediaUrl(m[1]), baseUrl);
+      if (!url || seen[url] || BAD_ASSET.test(url)) continue;
+      seen[url] = true;
+      found.push(url);
+    }
+  });
+  return found;
+}
+
+function findIframes(html, baseUrl) {
+  var out = [];
+  var re = /<iframe\b[^>]*?\s(?:data-)?src\s*=\s*["']([^"']+)["']/gi;
+  var m;
+  while ((m = re.exec(html)) !== null) {
+    var u = absoluteUrl(m[1], baseUrl);
+    if (u && out.indexOf(u) === -1) out.push(u);
+  }
+  return out;
+}
+
+function embedGet(url, referer) {
+  return fetchText(url, {
+    "User-Agent": UA,
+    "Referer": referer || BASE + "/",
+    "Accept": "text/html,application/xhtml+xml,*/*",
+    "Accept-Language": "en;q=0.9"
+  }, EMBED_TIMEOUT);
+}
+
+// Reads an HLS master playlist and returns one entry per resolution.
+function expandHls(url, headers) {
+  return fetchText(url, headers, M3U8_TIMEOUT).then(function (text) {
+    if (text.indexOf("#EXT-X-STREAM-INF") === -1) return [{ url: url, quality: "Auto" }];
+    var variants = [];
+    var seenQ = {};
+    var lines = text.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+      var res = /RESOLUTION=(\d+)x(\d+)/i.exec(line);
+      var height = res ? parseInt(res[2], 10) : 0;
+      var next = "";
+      for (var j = i + 1; j < lines.length; j++) {
+        var t = lines[j].trim();
+        if (t && t.charAt(0) !== "#") { next = t; i = j; break; }
+      }
+      if (!next || !height) continue;
+      var quality = height + "p";
+      if (seenQ[quality]) continue;
+      seenQ[quality] = true;
+      variants.push({ url: resolveRelative(next, url), quality: quality, height: height });
+    }
+    variants.sort(function (a, b) { return b.height - a.height; });
+    return variants.length ? variants : [{ url: url, quality: "Auto" }];
+  }).catch(function () {
+    return [{ url: url, quality: "Auto" }];
+  });
+}
+
+// item = { url, label }. depth 1 allows following one iframe (used for TV pages).
+function resolveEmbed(item, depth, referer) {
+  return embedGet(item.url, referer).then(function (html) {
+    var texts = [html].concat(unpackAll(html));
+    var urls = [];
+    texts.forEach(function (t) {
+      scanMediaUrls(t, item.url).forEach(function (u) { if (urls.indexOf(u) === -1) urls.push(u); });
+    });
+
+    if (!urls.length) {
+      var frames = depth < 1 ? findIframes(html, item.url) : [];
+      log(item.label + ": no media in page, iframes=" + frames.length);
+      return Promise.all(frames.slice(0, 2).map(function (f) {
+        return resolveEmbed({ url: f, label: item.label }, depth + 1, item.url);
+      })).then(flatten);
+    }
+
+    var origin = originOf(item.url);
+    var headers = { "User-Agent": UA, "Referer": origin + "/", "Origin": origin };
+    log(item.label + ": " + urls.length + " media url(s)");
+
+    return Promise.all(urls.slice(0, 3).map(function (u) {
+      if (/\.m3u8/i.test(u)) {
+        return expandHls(u, headers).then(function (variants) {
+          var list = [{ url: u, quality: "Auto" }].concat(variants.filter(function (v) { return v.url !== u; }));
+          return list.map(function (v) {
+            return { url: v.url, quality: v.quality, label: item.label, headers: headers };
+          });
+        });
+      }
+      return Promise.resolve([{ url: u, quality: qualityFromUrl(u) || "Auto", label: item.label, headers: headers }]);
+    })).then(flatten);
+  }).catch(function (err) {
+    log(item.label + " failed: " + (err && err.message));
+    return [];
+  });
+}
+
+function buildStreams(embedItems, title) {
+  return Promise.all(embedItems.map(function (item) {
+    return resolveEmbed(item, 0, BASE + "/");
+  })).then(function (groups) {
+    var streams = [];
+    var seen = {};
+    groups.forEach(function (items) {
+      items.forEach(function (it) {
+        if (seen[it.url]) return;
+        seen[it.url] = true;
+        streams.push({
+          name: PROVIDER_NAME + " " + it.label + " " + it.quality,
+          title: title + " - " + it.label,
+          url: it.url,
+          quality: it.quality,
+          headers: it.headers,
+          provider: PROVIDER_ID
+        });
+      });
+    });
+    log("playable streams: " + streams.length + " from " + embedItems.length + " servers");
+    return streams;
+  });
+}
+
+// ───────────────────────────── Movies / TV ─────────────────────────────
 
 function getMovieStreams(meta, title) {
   var queries = meta.titles.slice(0, 3);
@@ -189,7 +384,7 @@ function getMovieStreams(meta, title) {
         if (url && /^https?:\/\//.test(url)) embedUrls.push({ url: url, label: labels[key] });
       });
       log("movie servers found: " + embedUrls.length);
-      return buildStreams(embedUrls, title, labels);
+      return buildStreams(embedUrls, title);
     });
   });
 }
@@ -223,7 +418,7 @@ function getTvStreams(meta, season, episode, title) {
         embedUrls.push({ url: url, label: s.label });
       });
       log("tv servers found: " + embedUrls.length);
-      return buildStreams(embedUrls, title, serverLabels);
+      return buildStreams(embedUrls, title);
     });
   });
 }
