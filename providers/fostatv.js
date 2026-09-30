@@ -1,4 +1,3 @@
-
 var BASE_URL = 'https://fosta-tv.monster';
 var PROVIDER_ID = 'fostatv';
 var PROVIDER_NAME = '💡 FostaTV';
@@ -6,9 +5,15 @@ var PROVIDER_NAME = '💡 FostaTV';
 // Free key from https://www.themoviedb.org/settings/api
 var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
 
-// true  = only handle TMDB items whose original language is Arabic and skip
-//         dubbed / subtitled uploads (zero cross-talk with foreign titles).
-var ARABIC_ONLY = true;
+// ───────────────────────── Content language filter ─────────────────────
+// 'arabic'  = only Arabic-original content
+// 'english' = only English-original content
+// 'both'    = both Arabic and English content (default)
+var CONTENT_LANG = 'both';
+
+// true  = skip dubbed / subtitled uploads for Arabic content
+//         (zero cross-talk with foreign titles)
+var SKIP_DUB_SUB_ARABIC = true;
 
 var MAX_SEARCH_PAGES = 3;
 var MAX_MOVIE_CANDIDATES = 3;
@@ -90,16 +95,20 @@ function pad2(n) {
 // ────────────────────────── Title vocabulary ──────────────────────────
 
 var KIND_BY_WORD = {};
-[['فيلم', 'movie'], ['مسرحية', 'play'], ['مسلسل', 'series'], ['انمي', 'series'], ['برنامج', 'show']]
-  .forEach(function (p) { KIND_BY_WORD[normalizeText(p[0])] = p[1]; });
+[
+  ['فيلم', 'movie'], ['مسرحية', 'play'], ['مسلسل', 'series'], ['انمي', 'series'], ['برنامج', 'show'],
+  ['movie', 'movie'], ['film', 'movie'], ['play', 'play'], ['series', 'series'], ['show', 'show'], ['anime', 'series']
+].forEach(function (p) { KIND_BY_WORD[normalizeText(p[0])] = p[1]; });
 
-var DUB_WORDS = normalizedSet(['مدبلج', 'مدبلجة']);
-var SUB_WORDS = normalizedSet(['مترجم', 'مترجمة']);
-var SEASON_WORDS = normalizedSet(['الموسم', 'الجزء']);
-var EPISODE_WORD = normalizeText('الحلقة');
+var DUB_WORDS = normalizedSet(['مدبلج', 'مدبلجة', 'dubbed', 'dub']);
+var SUB_WORDS = normalizedSet(['مترجم', 'مترجمة', 'subtitled', 'subbed', 'sub']);
+var SEASON_WORDS = normalizedSet(['الموسم', 'الجزء', 'season']);
+var EPISODE_WORDS = normalizedSet(['الحلقة', 'episode', 'ep']);
 var NOISE_WORDS = normalizedSet([
   'كامل', 'كاملة', 'hd', 'fhd', 'uhd', '4k', 'bluray', 'hdrip', 'webrip', '720p', '1080p',
-  'بجودة', 'جودة', 'عالية', 'اون', 'لاين', 'اونلاين', 'مشاهدة', 'مباشرة', 'يوتيوب'
+  'بجودة', 'جودة', 'عالية', 'اون', 'لاين', 'اونلاين', 'مشاهدة', 'مباشرة', 'يوتيوب',
+  'complete', 'full', 'watch', 'online', 'streaming', 'blu-ray', 'web-rip',
+  'quality', 'high', 'youtube'
 ]);
 
 var ORDINALS = {};
@@ -118,7 +127,16 @@ function numberFromToken(token) {
 function parseTitle(raw) {
   var info = { kind: null, name: '', year: null, season: null, episode: null, dubbed: false, subbed: false };
   var tokens = normalizeText(raw).split(' ').filter(Boolean);
-  if (tokens.length && KIND_BY_WORD[tokens[0]]) info.kind = KIND_BY_WORD[tokens.shift()];
+
+  // Scan the first few tokens for a kind word; handles "مشاهدة فيلم ..." prefixes.
+  var kindIdx = -1;
+  for (var k = 0; k < Math.min(tokens.length, 3); k++) {
+    if (KIND_BY_WORD[tokens[k]]) { kindIdx = k; break; }
+  }
+  if (kindIdx !== -1) {
+    info.kind = KIND_BY_WORD[tokens[kindIdx]];
+    tokens.splice(kindIdx, 1);
+  }
 
   tokens = tokens.filter(function (t) {
     if (DUB_WORDS[t]) { info.dubbed = true; return false; }
@@ -127,7 +145,10 @@ function parseTitle(raw) {
   });
 
   if (info.kind === 'series' || info.kind === 'show') {
-    var epIdx = tokens.indexOf(EPISODE_WORD);
+    var epIdx = -1;
+    for (var e = 0; e < tokens.length; e++) {
+      if (EPISODE_WORDS[tokens[e]]) { epIdx = e; break; }
+    }
     if (epIdx !== -1) {
       if (/^\d+$/.test(tokens[epIdx + 1] || '')) info.episode = parseInt(tokens[epIdx + 1], 10);
       tokens = tokens.slice(0, epIdx);
@@ -289,6 +310,7 @@ function buildMeta(data, type) {
   var translations = (data.translations && data.translations.translations) || [];
   translations.forEach(function (t) {
     if (t.iso_639_1 === 'ar' && t.data) raw.push(isTv ? t.data.name : t.data.title);
+    if (t.iso_639_1 === 'en' && t.data) raw.push(isTv ? t.data.name : t.data.title);
   });
 
   if (!isTv) {
@@ -297,6 +319,12 @@ function buildMeta(data, type) {
   }
 
   var arabic = data.original_language === 'ar';
+  var english = data.original_language === 'en';
+
+  var processable = true;
+  if (CONTENT_LANG === 'arabic' && !arabic) processable = false;
+  if (CONTENT_LANG === 'english' && !english) processable = false;
+
   var seenNorm = {};
   var titles = [];
   raw.forEach(function (t) {
@@ -314,6 +342,8 @@ function buildMeta(data, type) {
   return {
     type: type,
     arabic: arabic,
+    english: english,
+    processable: processable,
     year: isNaN(year) ? null : year,
     displayTitle: titles.length ? titles[0].raw : (isTv ? data.name : data.title),
     targets: titles.map(function (t) { return t.norm; }),
@@ -366,7 +396,9 @@ function searchQueries(queries, onEntries, afterQuery) {
 function scoreMovieEntry(entry, meta) {
   var info = parseTitle(entry.title);
   if (info.kind !== 'movie' && info.kind !== 'play') return null;
-  if (meta.arabic && (info.dubbed || info.subbed)) return null;
+
+  // Only block dubbed/subbed uploads for Arabic-original content.
+  if (meta.arabic && SKIP_DUB_SUB_ARABIC && (info.dubbed || info.subbed)) return null;
 
   var yearDiff = meta.year && info.year ? Math.abs(meta.year - info.year) : null;
   if (yearDiff !== null && yearDiff > 1) return null;
@@ -478,7 +510,8 @@ function findSeriesEntries(meta, season) {
       var info = parseTitle(entry.title);
       if (info.kind !== 'series' && info.kind !== 'show') return;
       if (info.episode === null) return;
-      if (meta.arabic && (info.dubbed || info.subbed)) return;
+      // Only block dubbed/subbed uploads for Arabic-original content.
+      if (meta.arabic && SKIP_DUB_SUB_ARABIC && (info.dubbed || info.subbed)) return;
       var m = matchSeriesName(info.name, meta.targets);
       if (!m.matched) return;
       var entrySeason = info.season || m.trailingSeason || null;
@@ -611,7 +644,6 @@ function getSeriesStreams(meta, season, episode, title) {
 }
 
 // ──────────────────────── Servers (play.php) ──────────────────────────
-// FostaTV exposes its mirrors through play.php?vid=<vid> (Ahwak uses see.php).
 
 function fetchEmbedUrls(vid) {
   return siteGet(BASE_URL + '/play.php?vid=' + vid, BASE_URL + '/watch.php?vid=' + vid).then(function (html) {
@@ -635,7 +667,6 @@ function fetchEmbedUrls(vid) {
     collect(/<iframe\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']/gi);
     collect(/data-[a-z0-9_-]+\s*=\s*["'](https?:\/\/[^"']+)["']/gi);
 
-    // Loose scan for known FostaTV mirror hosts anywhere in the HTML.
     var reHost = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com|vkvideo|hgcloud|vidhide|listeamed)[^"'\s<>]*/gi;
     collect(reHost);
 
@@ -692,7 +723,6 @@ function cleanMediaUrl(url) {
     .trim();
 }
 
-// Dean Edwards p.a.c.k.e.r unpacker (1vid, Vidspeed, HGCloud, Mixdrop...).
 function unpackAll(text) {
   var out = [];
   if (text.indexOf('p,a,c,k,e') === -1) return out;
@@ -767,7 +797,6 @@ function extractGeneric(embedUrl) {
     });
 }
 
-// Dood-style (Dood, Playmogo, Uqload, DS2Play, Vidspeed): two-step pass_md5 handshake.
 function extractDood(embedUrl) {
   return fetchText(embedUrl, { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/', 'Accept-Language': 'ar,en;q=0.9' }, EMBED_TIMEOUT)
     .then(function (html) {
@@ -818,7 +847,6 @@ function extractOk(embedUrl) {
       var headers = { 'User-Agent': UA_EMBED, 'Referer': 'https://ok.ru/' };
       var out = [];
 
-      // Preferred: data-options JSON (Ahwak style).
       var m = /data-options\s*=\s*"([^"]+)"/.exec(html);
       if (m) {
         try {
@@ -836,7 +864,6 @@ function extractOk(embedUrl) {
         } catch (e) { /* fall through */ }
       }
 
-      // Fallback: raw JSON fields.
       var mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(html);
       if (mm) return [{ url: cleanMediaUrl(mm[1]), quality: 'Auto', headers: headers }];
       mm = /"videoUrl"\s*:\s*"([^"]+)"/i.exec(html);
@@ -916,8 +943,8 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
 
   return fetchTmdb(tmdbId, type).then(function (data) {
     var meta = buildMeta(data, type);
-    if (ARABIC_ONLY && !meta.arabic) {
-      log('skipped (not Arabic content): ' + meta.displayTitle);
+    if (!meta.processable) {
+      log('skipped (content filter=' + CONTENT_LANG + '): ' + meta.displayTitle + ' [' + (meta.arabic ? 'ar' : 'en') + ']');
       return [];
     }
     if (!meta.targets.length) {
@@ -927,7 +954,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     var title = type === 'tv'
       ? meta.displayTitle + ' S' + pad2(season) + 'E' + pad2(episode)
       : meta.displayTitle + (meta.year ? ' (' + meta.year + ')' : '');
-    log(type + ' "' + meta.displayTitle + '" queries=' + JSON.stringify(meta.queries));
+    log(type + ' "' + meta.displayTitle + '" lang=' + (meta.arabic ? 'ar' : 'en') + ' queries=' + JSON.stringify(meta.queries));
     return type === 'tv' ? getSeriesStreams(meta, season, episode, title) : getMovieStreams(meta, title);
   }).catch(function (err) {
     log('error: ' + (err && err.message));
