@@ -17,20 +17,6 @@
       "supportsExternalPlayer": true
     },
     {
-      "id": "atlantic",
-      "name": "Atlantic",
-      "description": "Movies and TV series from Atlantic",
-      "version": "1.0.0",
-      "author": "vanseleem",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/atlantic.js",
-      "enabled": true,
-      "formats": ["m3u8"],
-      "contentLanguage": ["en"],
-      "limited": false,
-      "supportsExternalPlayer": true
-    },
-    {
       "id": "netmirror",
       "name": "NetMirror",
       "description": "Netflix | Prime | Disney",
@@ -43,20 +29,6 @@
       "formats": ["mp4", "m3u8", "mkv"],
       "logo": "https://i.postimg.cc/L64M3bYV/netmirror.png",
       "contentLanguage": ["en", "hi", "ta", "te"]
-    },
-    {
-      "id": "fibwatch",
-      "name": "Fibwatch",
-      "description": "Movies and TV series from Fibwatch",
-      "version": "1.0.0",
-      "author": "vanseleem",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/fibwatch.js",
-      "enabled": true,
-      "formats": ["mp4", "m3u8", "iframe"],
-      "contentLanguage": ["en", "hi"],
-      "limited": false,
-      "supportsExternalPlayer": true
     },
     {
       "id": "movix",
