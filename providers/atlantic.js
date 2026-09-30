@@ -1,156 +1,282 @@
-"use strict";
+var __async = (__this, __arguments, generator) => {
+  return new Promise((resolve, reject) => {
+    var fulfilled = (value) => { try { step(generator.next(value)); } catch (e) { reject(e); } };
+    var rejected = (value) => { try { step(generator.throw(value)); } catch (e) { reject(e); } };
+    var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
+    step((generator = generator.apply(__this, __arguments)).next());
+  });
+};
 
-// ===== CONFIG =====
-var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
-var ATLANTIC_BASE = "https://atlantic.st";
-var REQUEST_TIMEOUT_MS = 12000;
-var MAX_RETRIES = 1;
-var RETRY_DELAY_MS = 600;
-var CACHE_TTL_MS = 3 * 60 * 1000;
-var FAIL_CACHE_TTL_MS = 60 * 1000;
-var PREFERRED_SERVERS = ["Moscow", "Novo", "Omsk"];
+// ---- Settings (edit here) ----
+const API_BASE = "https://cdn.hls.lol";
+const SITE = "https://atlantic.st";
+const USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+const SERVER_LABEL = "Aphrodite";
+const CACHE_TTL_MS = 3 * 60 * 1000;   // successful responses are reused for 3 minutes
+const FAIL_TTL_MS = 60 * 1000;        // a failed/blocked URL is not requested again for 60 seconds
+const MAX_RETRIES = 1;                // one retry, network errors and 5xx only (never 403/429)
+const RETRY_DELAY_MS = 400;
+const REQUEST_TIMEOUT_MS = 8000;
+const MAX_CACHE_ENTRIES = 200;
 
-var cache = {};
-var inflight = {};
+const cache = new Map();      // url -> { at, value }
+const failures = new Map();   // url -> { at, status }
+const inflight = new Map();   // url -> Promise (identical simultaneous requests share one call)
 
-function qualityFromUrl(url) {
-  var s = String(url).toLowerCase();
-  if (/2160|4k/.test(s)) return "4K";
-  if (/1440/.test(s)) return "1440p";
-  if (/1080/.test(s)) return "1080p";
-  if (/720/.test(s)) return "720p";
-  if (/480/.test(s)) return "480p";
-  if (/360/.test(s)) return "360p";
-  return null;
-}
-
-function delay(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+function sleep(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
 function withTimeout(promise, ms) {
-  return new Promise(function(resolve, reject) {
-    var timer = setTimeout(function() { reject(new Error("Timeout after " + ms + "ms")); }, ms);
+  return new Promise(function (resolve, reject) {
+    const timer = setTimeout(function () { reject(new Error("timeout after " + ms + "ms")); }, ms);
     promise.then(
-      function(v) { clearTimeout(timer); resolve(v); },
-      function(e) { clearTimeout(timer); reject(e); }
+      function (v) { clearTimeout(timer); resolve(v); },
+      function (e) { clearTimeout(timer); reject(e); }
     );
   });
 }
 
-function fetchAtlanticStreams(tmdbId, mediaType, season, episode, attempt) {
-  attempt = attempt || 0;
-  var query = "tmdbId=" + encodeURIComponent(String(tmdbId)) + "&type=" + encodeURIComponent(mediaType);
-  if (mediaType === "tv") {
-    query += "&season=" + encodeURIComponent(String(season || 1)) + "&episode=" + encodeURIComponent(String(episode || 1));
+function trimMaps(now) {
+  for (const [k, v] of cache) {
+    if (now - v.at >= CACHE_TTL_MS) cache.delete(k);
   }
-  var fullUrl = ATLANTIC_BASE + "/api/get-streams?" + query;
-  console.log("[Atlantic] Fetching streams:", fullUrl, "attempt", attempt);
-
-  return withTimeout(fetch(fullUrl, {
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Accept": "application/json",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Referer": ATLANTIC_BASE + "/",
-      "Origin": ATLANTIC_BASE
-    }
-  }), REQUEST_TIMEOUT_MS)
-    .then(function(response) {
-      if (!response.ok) {
-        var httpErr = new Error("HTTP " + response.status);
-        httpErr.status = response.status;
-        throw httpErr;
-      }
-      return response.text();
-    })
-    .then(function(text) {
-      try {
-        return JSON.parse(text) || {};
-      } catch (e) {
-        var parseErr = new Error("Non-JSON response: " + String(text).slice(0, 120));
-        parseErr.noRetry = true;
-        throw parseErr;
-      }
-    })
-    .catch(function(err) {
-      var retryable = !err.noRetry && (!err.status || err.status >= 500);
-      if (retryable && attempt < MAX_RETRIES) {
-        return delay(RETRY_DELAY_MS).then(function() {
-          return fetchAtlanticStreams(tmdbId, mediaType, season, episode, attempt + 1);
-        });
-      }
-      throw err;
-    });
+  for (const [k, v] of failures) {
+    if (now - v.at >= FAIL_TTL_MS) failures.delete(k);
+  }
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    cache.delete(cache.keys().next().value);
+  }
 }
 
-function makeStream(url, server, label) {
-  var quality = qualityFromUrl(url) || (label && label !== "Auto" ? label : null) || "Auto";
+// Returns { kind: "ok" | "missing" | "fail", value?, status? }
+function fetchWithRetry(url) {
+  return __async(this, null, function* () {
+    let attempt = 0;
+    for (;;) {
+      let res = null;
+      let netError = "";
+      try {
+        res = yield withTimeout(fetch(url, {
+          headers: {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Referer": SITE + "/",
+            "Origin": SITE
+          },
+          redirect: "follow"
+        }), REQUEST_TIMEOUT_MS);
+      } catch (e) {
+        netError = (e && e.message) || "network error";
+      }
+
+      if (res) {
+        const status = res.status;
+        if (status === 403 || status === 429) return { kind: "fail", status: status };  // blocked: never retry
+        if (status === 404) return { kind: "missing" };
+        if (status < 500) {
+          if (!res.ok) return { kind: "fail", status: status };
+          try {
+            const data = yield res.json();
+            return { kind: "ok", value: data };
+          } catch (e) {
+            return { kind: "fail", status: "BAD_JSON" };
+          }
+        }
+        // 5xx falls through to the retry logic below
+      }
+
+      // reached only for network errors and 5xx
+      if (attempt < MAX_RETRIES) {
+        attempt++;
+        console.log("[Atlantic] retry", attempt, res ? "HTTP " + res.status : netError);
+        yield sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      return { kind: "fail", status: res ? res.status : "ERR" };
+    }
+  });
+}
+
+function requestJson(url) {
+  const now = Date.now();
+  trimMaps(now);
+
+  const hit = cache.get(url);
+  if (hit && now - hit.at < CACHE_TTL_MS) {
+    console.log("[Atlantic] cache hit");
+    return Promise.resolve(hit.value);
+  }
+
+  const bad = failures.get(url);
+  if (bad && now - bad.at < FAIL_TTL_MS) {
+    console.log("[Atlantic] skipped (recent failure:", bad.status + ")");
+    return Promise.resolve(null);
+  }
+
+  if (inflight.has(url)) {
+    console.log("[Atlantic] joining in-flight request");
+    return inflight.get(url);
+  }
+
+  const p = fetchWithRetry(url).then(
+    function (r) {
+      inflight.delete(url);
+      const t = Date.now();
+      if (r.kind === "ok") {
+        cache.set(url, { at: t, value: r.value });
+        failures.delete(url);
+        return r.value;
+      }
+      if (r.kind === "missing") {
+        cache.set(url, { at: t, value: null });
+        return null;
+      }
+      failures.set(url, { at: t, status: r.status });
+      console.log("[Atlantic] request failed:", r.status);
+      return null;
+    },
+    function (e) {
+      inflight.delete(url);
+      failures.set(url, { at: Date.now(), status: "ERR" });
+      return null;
+    }
+  );
+  inflight.set(url, p);
+  return p;
+}
+
+function buildPath(mediaType, tmdbId, season, episode) {
+  const id = encodeURIComponent(String(tmdbId));
+  if (mediaType === "tv" || mediaType === "series") {
+    return "/content/tv/" + id + "/" + (Number(season) || 1) + "/" + (Number(episode) || 1);
+  }
+  return "/content/movie/" + id;
+}
+
+function makeStream(url) {
   return {
-    name: "🌊 Atlantic",
-    title: "🌊 Atlantic • " + server + " • " + quality,
+    name: "Atlantic",
+    title: "Atlantic \u2022 " + SERVER_LABEL + " (HLS)",
     url: url,
-    quality: quality,
+    quality: "Auto",
+    type: "application/x-mpegURL",
+    referer: SITE + "/",
     headers: {
       "User-Agent": USER_AGENT,
-      "Referer": ATLANTIC_BASE + "/",
-      "Origin": ATLANTIC_BASE
+      "Referer": SITE + "/",
+      "Origin": SITE
     }
   };
 }
 
-function buildStreams(sources) {
-  var keys = Object.keys(sources || {});
-  var names = PREFERRED_SERVERS.filter(function(n) { return keys.indexOf(n) !== -1; })
-    .concat(keys.filter(function(k) { return PREFERRED_SERVERS.indexOf(k) === -1; }));
-
-  var seen = {};
-  var streams = [];
-  names.forEach(function(serverName) {
-    var source = sources[serverName];
-    if (!source || typeof source.url !== "string" || !source.url) return;
-    if (seen[source.url]) return;
-    seen[source.url] = true;
-    streams.push(makeStream(source.url, serverName, source.label || null));
-  });
-  return streams;
-}
-
 function getStreams(tmdbId, mediaType, season, episode) {
-  console.log("[Atlantic] Request:", tmdbId, mediaType, season, episode);
-  if (!tmdbId || (mediaType !== "movie" && mediaType !== "tv")) return Promise.resolve([]);
-  if (mediaType === "tv" && (!season || !episode)) return Promise.resolve([]);
+  return __async(this, null, function* () {
+    if (!tmdbId) return [];
+    if (mediaType !== "movie" && mediaType !== "tv" && mediaType !== "series") return [];
 
-  var key = mediaType + ":" + tmdbId + ":" + (season || 0) + ":" + (episode || 0);
-  var hit = cache[key];
-  if (hit && hit.expires > Date.now()) {
-    console.log("[Atlantic] Cache hit:", key);
-    return Promise.resolve(hit.streams);
-  }
-  if (inflight[key]) return inflight[key];
+    const path = buildPath(mediaType, tmdbId, season, episode);
+    console.log("[Atlantic] Request:", path);
 
-  inflight[key] = fetchAtlanticStreams(tmdbId, mediaType, season, episode)
-    .then(function(sources) {
-      var streams = buildStreams(sources);
-      console.log("[Atlantic] Total streams:", streams.length);
-      cache[key] = { streams: streams, expires: Date.now() + (streams.length ? CACHE_TTL_MS : FAIL_CACHE_TTL_MS) };
-      return streams;
-    })
-    .catch(function(error) {
-      console.error("[Atlantic] getStreams error:", error.message);
-      cache[key] = { streams: [], expires: Date.now() + FAIL_CACHE_TTL_MS };
+    const data = yield requestJson(API_BASE + path);
+    if (!data || !data.found) {
+      console.log("[Atlantic] no stream available");
       return [];
-    })
-    .then(function(streams) {
-      delete inflight[key];
-      return streams;
-    });
+    }
 
-  return inflight[key];
+    const link = data.hls || (data.type === "hls" ? data.url : "");
+    if (!link || !/^https?:\/\//i.test(link)) {
+      console.log("[Atlantic] response has no usable hls link");
+      return [];
+    }
+
+    console.log("[Atlantic] Final streams: 1");
+    return [makeStream(link)];
+  });
 }
 
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = { getStreams: getStreams };
+module.exports = { getStreams };
+EOF
+
+node --check providers/atlantic.js && echo "SYNTAX OK"
+
+echo "========== HERMES CHECK =========="
+grep -nE "AbortSignal|new URL|Buffer|async function|await |node-fetch|require\(" providers/atlantic.js || true
+echo "=================================="
+
+node - <<'NODE'
+const fs = require("fs");
+const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+if (!m.scrapers.some(s => s.id === "atlantic")) {
+  m.scrapers.push({
+    id: "atlantic",
+    name: "Atlantic",
+    description: "Movies and TV streaming provider (HLS)",
+    version: "1.0.0",
+    author: "vanseleem",
+    supportedTypes: ["movie", "tv"],
+    filename: "providers/atlantic.js",
+    enabled: true,
+    formats: ["m3u8"],
+    contentLanguage: ["en"],
+    limited: false,
+    supportsExternalPlayer: true
+  });
+  fs.writeFileSync("manifest.json", JSON.stringify(m, null, 2) + "\n");
+  console.log("manifest: atlantic added");
 } else {
-  global.getStreams = getStreams;
+  console.log("manifest: atlantic already present");
 }
+NODE
+
+node - <<'NODE'
+const realFetch = global.fetch;
+const p = require('./providers/atlantic.js');
+
+async function peek(url, headers) {
+  try {
+    const r = await realFetch(url, { headers: headers });
+    const t = await r.text();
+    return r.status + " | " + t.slice(0, 160).replace(/\s+/g, " ");
+  } catch (e) { return "ERR " + e.message; }
+}
+
+(async () => {
+  console.log("\n=== LIVE: movie 533535 ===");
+  const m = await p.getStreams("533535", "movie");
+  console.log("STREAM COUNT:", m.length);
+  for (const s of m) { console.log(s.title); console.log(s.url); console.log(JSON.stringify(s.headers)); }
+  if (m[0]) {
+    console.log("playlist WITH provider headers:", await peek(m[0].url, m[0].headers));
+    console.log("playlist WITHOUT headers      :", await peek(m[0].url, {}));
+  }
+
+  for (const t of [["1396", "Breaking Bad"], ["66732", "Stranger Things"]]) {
+    console.log("\n=== LIVE: TV " + t[1] + " S1E1 ===");
+    const s = await p.getStreams(t[0], "tv", 1, 1);
+    console.log("STREAM COUNT:", s.length);
+    for (const x of s) console.log(x.url);
+  }
+
+  console.log("\n=== RULES: dedupe + cache (expect 1 network call) ===");
+  let n = 0;
+  global.fetch = function (u, o) { if (String(u).indexOf("/content/") !== -1) n++; return realFetch(u, o); };
+  await Promise.all([p.getStreams("27205", "movie"), p.getStreams("27205", "movie")]);
+  await p.getStreams("27205", "movie");
+  console.log("network calls for 3 requests:", n);
+
+  console.log("\n=== RULES: retry + failure cache (offline stub) ===");
+  const calls = {};
+  global.fetch = async function (u) {
+    const id = String(u).match(/\/content\/movie\/(\d+)$/)[1];
+    calls[id] = (calls[id] || 0) + 1;
+    if (id === "1001") return { ok: false, status: 503, json: async () => ({}) };
+    if (id === "1002") return { ok: false, status: 403, json: async () => ({}) };
+    throw new Error("ECONNRESET");
+  };
+  for (const id of ["1001", "1002", "1003"]) {
+    await p.getStreams(id, "movie");
+    await p.getStreams(id, "movie");
+  }
+  console.log("calls per id:", JSON.stringify(calls), "(expect 1001:2  1002:1  1003:2)");
+})().catch(err => { console.error(err); process.exit(1); });
