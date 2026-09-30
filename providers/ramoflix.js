@@ -1,6 +1,3 @@
-// ═══════════════════════════════════════════════════════════════════════
-// RamoFlix — fmovie theme provider
-// ═══════════════════════════════════════════════════════════════════════
 var BASE = "https://ramoflix.net";
 var PROVIDER_ID = "ramoflix";
 var PROVIDER_NAME = "🎬 RamoFlix";
@@ -132,20 +129,13 @@ function extractTvServerLabels(html) {
   return labels;
 }
 
-// ── FIXED: set Referer/Origin to each embed's own domain ──
-function hostOf(url) {
-  var m = /^https?:\/\/([^\/?#:]+)/i.exec(url);
-  return m ? m[1].toLowerCase().replace(/^www\./, "") : "";
-}
-function originOf(url) {
-  var m = /^(https?:\/\/[^\/?#]+)/i.exec(url);
-  return m ? m[1] : "";
-}
-
-function buildStreams(embedUrls, title) {
+function buildStreams(embedUrls, title, serverLabels) {
   var streams = [];
   embedUrls.forEach(function (item) {
-    var origin = originOf(item.url);
+    // ── THE ONLY CHANGE: Referer points to the embed's own origin ──
+    var m = item.url.match(/^https?:\/\/[^\/?#]+/i);
+    var referer = m ? m[0] + "/" : BASE + "/";
+
     streams.push({
       name: PROVIDER_NAME + " " + item.label + " (Auto)",
       title: title + " - " + item.label,
@@ -153,11 +143,7 @@ function buildStreams(embedUrls, title) {
       quality: "Auto",
       size: "Unknown",
       type: "iframe",
-      headers: {
-        "User-Agent": UA,
-        "Referer": origin + "/",
-        "Origin": origin
-      },
+      headers: { "User-Agent": UA, "Referer": referer },
       provider: PROVIDER_ID
     });
   });
@@ -165,20 +151,22 @@ function buildStreams(embedUrls, title) {
 }
 
 function getMovieStreams(meta, title) {
-  return Promise.all(meta.titles.map(function (t) {
-    return searchSite(t).catch(function () { return []; });
-  })).then(function (groups) {
-    var all = [], seen = {};
-    groups.forEach(function (g) {
-      g.forEach(function (r) {
-        if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
-      });
+  var queries = meta.titles.slice(0, 3);
+  var allResults = [], seen = {};
+  var qi = 0;
+  function nextQuery() {
+    if (qi >= queries.length) return Promise.resolve();
+    return searchSite(queries[qi++]).then(function (results) {
+      results.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; allResults.push(r); } });
+      return nextQuery();
     });
-    log("Movie candidates: " + all.length);
-    if (!all.length) return [];
-    var best = chooseResult(all, meta.titles);
-    if (!best) return [];
-    return fetchText(best.url, BASE + "/").then(function (html) {
+  }
+  return nextQuery().then(function () {
+    log("Movie candidates: " + allResults.length);
+    if (!allResults.length) return [];
+    var match = chooseResult(allResults, meta.titles);
+    if (!match) return [];
+    return fetchText(match.url, BASE + "/").then(function (html) {
       var servers = extractServers(html);
       if (!servers) { log("No Servers object"); return []; }
       var labels = extractServerLabels(html);
@@ -188,26 +176,28 @@ function getMovieStreams(meta, title) {
         if (url && /^https?:\/\//.test(url)) embedUrls.push({ url: url, label: labels[key] });
       });
       log("Movie servers: " + embedUrls.length);
-      return buildStreams(embedUrls, title);
+      return buildStreams(embedUrls, title, labels);
     });
   });
 }
 
 function getTvStreams(meta, season, episode, title) {
-  return Promise.all(meta.titles.map(function (t) {
-    return searchSite(t).catch(function () { return []; });
-  })).then(function (groups) {
-    var all = [], seen = {};
-    groups.forEach(function (g) {
-      g.forEach(function (r) {
-        if (!seen[r.url]) { seen[r.url] = 1; all.push(r); }
-      });
+  var queries = meta.titles.slice(0, 3);
+  var allResults = [], seen = {};
+  var qi = 0;
+  function nextQuery() {
+    if (qi >= queries.length) return Promise.resolve();
+    return searchSite(queries[qi++]).then(function (results) {
+      results.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; allResults.push(r); } });
+      return nextQuery();
     });
-    log("TV candidates: " + all.length);
-    if (!all.length) return [];
-    var best = chooseResult(all, meta.titles);
-    if (!best) return [];
-    return fetchText(best.url, BASE + "/").then(function (html) {
+  }
+  return nextQuery().then(function () {
+    log("TV candidates: " + allResults.length);
+    if (!allResults.length) return [];
+    var match = chooseResult(allResults, meta.titles);
+    if (!match) return [];
+    return fetchText(match.url, BASE + "/").then(function (html) {
       var eps = extractEpisodes(html);
       if (!eps || !eps.post_id) { log("No Episodes object"); return []; }
       var postId = eps.post_id;
@@ -220,7 +210,7 @@ function getTvStreams(meta, season, episode, title) {
         embedUrls.push({ url: url, label: s.label });
       });
       log("TV servers: " + embedUrls.length);
-      return buildStreams(embedUrls, title);
+      return buildStreams(embedUrls, title, serverLabels);
     });
   });
 }
