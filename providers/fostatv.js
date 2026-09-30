@@ -1,4 +1,6 @@
-
+// ─────────────────────────────────────────────────────────────────────
+// FostaTV — AhwakTV architecture (ported)
+// ─────────────────────────────────────────────────────────────────────
 var BASE_URL = 'https://fosta-tv.monster';
 var PROVIDER_ID = 'fostatv';
 var PROVIDER_NAME = 'FostaTV';
@@ -10,9 +12,9 @@ var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
 //         dubbed / subtitled uploads (zero cross-talk with foreign titles).
 var ARABIC_ONLY = true;
 
-var MAX_SEARCH_PAGES = 10;
-var MAX_MOVIE_CANDIDATES = 5;
-var MAX_EPISODE_CANDIDATES = 3;
+var MAX_SEARCH_PAGES = 3;
+var MAX_MOVIE_CANDIDATES = 3;
+var MAX_EPISODE_CANDIDATES = 2;
 var SITE_TIMEOUT = 15000;
 var EMBED_TIMEOUT = 12000;
 
