@@ -1,938 +1,460 @@
+var BASE = "https://fosta-tv.monster";
+var UA = "Mozilla/5.0 (Linux; Android 10, K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-var BASE_URL = 'https://fosta-tv.monster';
-var PROVIDER_ID = 'fostatv';
-var PROVIDER_NAME = 'FostaTV';
-
-// Free key from https://www.themoviedb.org/settings/api
-var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
-
-// true  = only handle TMDB items whose original language is Arabic and skip
-//         dubbed / subtitled uploads (zero cross-talk with foreign titles).
-var ARABIC_ONLY = true;
-
-var MAX_SEARCH_PAGES = 3;
-var MAX_MOVIE_CANDIDATES = 3;
-var MAX_EPISODE_CANDIDATES = 2;
-var SITE_TIMEOUT = 15000;
-var EMBED_TIMEOUT = 12000;
-
-var UA_SITE = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36';
-var UA_EMBED = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
-// ─────────────────────────────── Logging ──────────────────────────────
-
-function log(message) {
-  console.log('[FostaTV] ' + message);
-}
-
-// ───────────────────────────── Text helpers ───────────────────────────
-
-function decodeEntities(str) {
-  return String(str == null ? '' : str)
-    .replace(/&#x([0-9a-f]+);/gi, function (_, hex) { return String.fromCharCode(parseInt(hex, 16)); })
-    .replace(/&#(\d+);/g, function (_, dec) { return String.fromCharCode(parseInt(dec, 10)); })
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&');
-}
-
-function toWesternDigits(str) {
-  return String(str)
-    .replace(/[\u0660-\u0669]/g, function (c) { return String(c.charCodeAt(0) - 0x0660); })
-    .replace(/[\u06F0-\u06F9]/g, function (c) { return String(c.charCodeAt(0) - 0x06F0); });
-}
-
-function normalizeText(input) {
-  var s = toWesternDigits(decodeEntities(input)).toLowerCase();
-  if (typeof s.normalize === 'function') {
-    s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
-  s = s
-    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
-    .replace(/[\u0622\u0623\u0625\u0671]/g, '\u0627')
-    .replace(/\u0649/g, '\u064A')
-    .replace(/\u0629/g, '\u0647')
-    .replace(/\u0624/g, '\u0648')
-    .replace(/\u0626/g, '\u064A')
-    .replace(/\u0686/g, '\u062C')
-    .replace(/\u067E/g, '\u0628')
-    .replace(/\u06A4/g, '\u0641')
-    .replace(/[\u06AF\u06A9]/g, '\u0643')
-    .replace(/\u06CC/g, '\u064A');
-  return s.replace(/[^\u0621-\u064Aa-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function normalizedSet(words) {
-  var set = {};
-  words.forEach(function (w) { set[normalizeText(w)] = true; });
-  return set;
-}
-
-function cleanQuery(text) {
-  return decodeEntities(text)
-    .replace(/[\u060C\u061B\u061F\u066A-\u066D\u06D4]/g, ' ')
-    .replace(/[!-\/:-@\[-`{-~]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function hasArabicScript(text) {
-  return /[\u0600-\u06FF]/.test(text);
-}
-
-function pad2(n) {
-  return n < 10 ? '0' + n : String(n);
-}
-
-// ────────────────────────── Title vocabulary ──────────────────────────
-
-var KIND_BY_WORD = {};
-[['فيلم', 'movie'], ['مسرحية', 'play'], ['مسلسل', 'series'], ['انمي', 'series'], ['برنامج', 'show']]
-  .forEach(function (p) { KIND_BY_WORD[normalizeText(p[0])] = p[1]; });
-
-var DUB_WORDS = normalizedSet(['مدبلج', 'مدبلجة']);
-var SUB_WORDS = normalizedSet(['مترجم', 'مترجمة']);
-var SEASON_WORDS = normalizedSet(['الموسم', 'الجزء']);
-var EPISODE_WORD = normalizeText('الحلقة');
-var NOISE_WORDS = normalizedSet([
-  'كامل', 'كاملة', 'hd', 'fhd', 'uhd', '4k', 'bluray', 'hdrip', 'webrip', '720p', '1080p',
-  'بجودة', 'جودة', 'عالية', 'اون', 'لاين', 'اونلاين', 'مشاهدة', 'مباشرة', 'يوتيوب'
-]);
-
-var ORDINALS = {};
-[
-  ['الاول', 1], ['الاولى', 1], ['الثاني', 2], ['الثانية', 2], ['الثالث', 3], ['الثالثة', 3],
-  ['الرابع', 4], ['الرابعة', 4], ['الخامس', 5], ['الخامسة', 5], ['السادس', 6], ['السادسة', 6],
-  ['السابع', 7], ['السابعة', 7], ['الثامن', 8], ['الثامنة', 8], ['التاسع', 9], ['التاسعة', 9],
-  ['العاشر', 10], ['العاشرة', 10]
-].forEach(function (p) { ORDINALS[normalizeText(p[0])] = p[1]; });
-
-function numberFromToken(token) {
-  if (/^\d{1,3}$/.test(token)) return parseInt(token, 10);
-  return ORDINALS[token] || null;
-}
-
-function parseTitle(raw) {
-  var info = { kind: null, name: '', year: null, season: null, episode: null, dubbed: false, subbed: false };
-  var tokens = normalizeText(raw).split(' ').filter(Boolean);
-  if (tokens.length && KIND_BY_WORD[tokens[0]]) info.kind = KIND_BY_WORD[tokens.shift()];
-
-  tokens = tokens.filter(function (t) {
-    if (DUB_WORDS[t]) { info.dubbed = true; return false; }
-    if (SUB_WORDS[t]) { info.subbed = true; return false; }
-    return true;
-  });
-
-  if (info.kind === 'series' || info.kind === 'show') {
-    var epIdx = tokens.indexOf(EPISODE_WORD);
-    if (epIdx !== -1) {
-      if (/^\d+$/.test(tokens[epIdx + 1] || '')) info.episode = parseInt(tokens[epIdx + 1], 10);
-      tokens = tokens.slice(0, epIdx);
-    }
-    for (var i = 0; i < tokens.length - 1; i++) {
-      var n = SEASON_WORDS[tokens[i]] ? numberFromToken(tokens[i + 1]) : null;
-      if (n) { info.season = n; tokens.splice(i, 2); break; }
-    }
-  } else {
-    for (var j = tokens.length - 1; j >= 0; j--) {
-      if (/^(19|20)\d\d$/.test(tokens[j])) {
-        if (tokens.length > 1) { info.year = parseInt(tokens[j], 10); tokens.splice(j, 1); }
-        break;
-      }
-    }
-  }
-
-  info.name = tokens.filter(function (t) { return !NOISE_WORDS[t]; }).join(' ');
-  return info;
-}
-
-// ─────────────────────────── Fuzzy comparison ─────────────────────────
-
-function bigramMap(str) {
-  var s = str.replace(/ /g, '');
-  var map = {};
-  var size = 0;
-  for (var i = 0; i < s.length - 1; i++) {
-    var g = s.substr(i, 2);
-    map[g] = (map[g] || 0) + 1;
-    size++;
-  }
-  return { map: map, size: size };
-}
-
-function diceScore(a, b) {
-  if (a === b) return 1;
-  var x = bigramMap(a);
-  var y = bigramMap(b);
-  if (!x.size || !y.size) return 0;
-  var common = 0;
-  Object.keys(x.map).forEach(function (g) {
-    if (y.map[g]) common += Math.min(x.map[g], y.map[g]);
-  });
-  return (2 * common) / (x.size + y.size);
-}
-
-function numberTokens(str) {
-  return (str.match(/\d+/g) || []).join(',');
-}
-
-// ──────────────────────────────── HTTP ────────────────────────────────
-
-function asciiSafe(value) {
-  return String(value).replace(/[^\x00-\x7F]/g, function (c) { return encodeURIComponent(c); });
-}
-
-function withTimeout(promise, ms, label) {
-  if (typeof setTimeout !== 'function') return promise;
-  return new Promise(function (resolve, reject) {
-    var timer = setTimeout(function () { reject(new Error('timeout: ' + label)); }, ms);
-    promise.then(
-      function (v) { clearTimeout(timer); resolve(v); },
-      function (e) { clearTimeout(timer); reject(e); }
-    );
+function fetchText(url, referer) {
+  url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  var headers = { "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" };
+  if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.text();
   });
 }
 
-function fetchText(url, headers, timeoutMs) {
-  url = asciiSafe(url);
-  if (headers && headers['Referer']) headers['Referer'] = asciiSafe(headers['Referer']);
-  return withTimeout(fetch(url, { method: 'GET', headers: headers, redirect: 'follow' }), timeoutMs, url.split('?')[0])
-    .then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + url.split('?')[0]);
-      return res.text();
+function decodeHtml(str) {
+  return String(str || "")
+    .replace(/&amp;/g, "&").replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'").replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+}
+
+function normalizeArabic(s) {
+  return String(s || "")
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/[^\w\u0600-\u06FF ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getTmdbTitles(tmdbId, mediaType) {
+  var type = mediaType === "tv" ? "tv" : "movie";
+  var langs = ["ar", "en"];
+  return Promise.all(langs.map(function(lang) {
+    var url = "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) + "?api_key=" + TMDB_API_KEY + "&language=" + lang;
+    return fetch(url).then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; });
+  })).then(function(responses) {
+    var titles = [];
+    responses.forEach(function(d) {
+      if (!d) return;
+      var t = type === "movie" ? (d.title || d.original_title) : (d.name || d.original_name);
+      if (t && titles.indexOf(t) === -1) titles.push(t);
     });
-}
-
-function siteGet(url, referer) {
-  return fetchText(url, {
-    'User-Agent': UA_SITE,
-    'Referer': referer || BASE_URL + '/',
-    'Accept': 'text/html,application/xhtml+xml',
-    'Accept-Language': 'ar,en;q=0.9'
-  }, SITE_TIMEOUT);
-}
-
-function hostOf(url) {
-  var m = /^https?:\/\/([^\/?#:]+)/i.exec(url);
-  return m ? m[1].toLowerCase().replace(/^www\./, '') : '';
-}
-
-function originOf(url) {
-  var m = /^(https?:\/\/[^\/?#]+)/i.exec(url);
-  return m ? m[1] : '';
-}
-
-function absoluteUrl(url, baseUrl) {
-  var u = decodeEntities(url).trim();
-  if (/^https?:\/\//i.test(u)) return u;
-  if (u.indexOf('//') === 0) return 'https:' + u;
-  if (u.charAt(0) === '/') return originOf(baseUrl) + u;
-  return '';
-}
-
-// ─────────────────────────── HTML extraction ──────────────────────────
-
-function getAttr(tag, name) {
-  var m = new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\')', 'i').exec(tag);
-  return m ? (m[1] !== undefined ? m[1] : m[2]) : '';
-}
-
-function parseWatchAnchors(html) {
-  var byVid = {};
-  var out = [];
-  var re = /<a\b[^>]*>/gi;
-  var m;
-  while ((m = re.exec(html)) !== null) {
-    var tag = m[0];
-    var idMatch = /watch\.php\?vid=([A-Za-z0-9]+)/.exec(decodeEntities(getAttr(tag, 'href')));
-    if (!idMatch) continue;
-    var vid = idMatch[1];
-    var title = decodeEntities(getAttr(tag, 'title')).trim();
-    var closeAt = html.indexOf('</a>', re.lastIndex);
-    var inner = closeAt === -1 ? '' : html.slice(re.lastIndex, Math.min(closeAt, re.lastIndex + 400));
-    var text = decodeEntities(inner.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
-    if (byVid[vid]) {
-      if (!byVid[vid].title && title) byVid[vid].title = title;
-      continue;
-    }
-    byVid[vid] = { vid: vid, title: title, text: text, index: m.index };
-    out.push(byVid[vid]);
-  }
-  return out;
-}
-
-function parseMaxPage(html) {
-  var max = 1;
-  var re = /[?&;]page=(\d+)/g;
-  var m;
-  while ((m = re.exec(html)) !== null) max = Math.max(max, parseInt(m[1], 10));
-  return max;
-}
-
-// ──────────────────────────────── TMDB ────────────────────────────────
-
-function fetchTmdb(tmdbId, type) {
-  var url = 'https://api.themoviedb.org/3/' + type + '/' + encodeURIComponent(tmdbId) +
-    '?api_key=' + TMDB_API_KEY + '&language=ar&append_to_response=translations,alternative_titles';
-  return fetchText(url, { 'Accept': 'application/json' }, SITE_TIMEOUT).then(function (body) {
-    return JSON.parse(body);
+    console.log("[FostaTV] TMDB titles:", titles.join(" | "));
+    return titles;
   });
 }
 
-function buildMeta(data, type) {
-  var isTv = type === 'tv';
-  var raw = [isTv ? data.name : data.title, isTv ? data.original_name : data.original_title];
-
-  var translations = (data.translations && data.translations.translations) || [];
-  translations.forEach(function (t) {
-    if (t.iso_639_1 === 'ar' && t.data) raw.push(isTv ? t.data.name : t.data.title);
-  });
-
-  if (!isTv) {
-    var alts = (data.alternative_titles && data.alternative_titles.titles) || [];
-    alts.forEach(function (a) { raw.push(a.title); });
-  }
-
-  var arabic = data.original_language === 'ar';
-  var seenNorm = {};
-  var titles = [];
-  raw.forEach(function (t) {
-    if (!t) return;
-    if (arabic && !hasArabicScript(t)) return;
-    var norm = normalizeText(t);
-    if (!norm || seenNorm[norm]) return;
-    seenNorm[norm] = true;
-    titles.push({ raw: t, norm: norm });
-  });
-
-  var dateStr = isTv ? data.first_air_date : data.release_date;
-  var year = dateStr ? parseInt(String(dateStr).slice(0, 4), 10) : null;
-
-  return {
-    type: type,
-    arabic: arabic,
-    year: isNaN(year) ? null : year,
-    displayTitle: titles.length ? titles[0].raw : (isTv ? data.name : data.title),
-    targets: titles.map(function (t) { return t.norm; }),
-    queries: titles.slice(0, 3).map(function (t) { return cleanQuery(t.raw); }).filter(Boolean)
-  };
-}
-
-// ─────────────────────────────── Search ───────────────────────────────
-
-function searchPage(query, page) {
-  var url = BASE_URL + '/search.php?keywords=' + encodeURIComponent(query) + (page > 1 ? '&page=' + page : '');
-  return siteGet(url).then(function (html) {
-    return {
-      entries: parseWatchAnchors(html).filter(function (a) { return a.title; }),
-      maxPage: parseMaxPage(html)
-    };
-  });
-}
-
-function searchPages(query, onEntries) {
-  var page = 1;
-  function step() {
-    return searchPage(query, page).then(function (res) {
-      if (onEntries(res.entries)) return true;
-      if (page >= MAX_SEARCH_PAGES || page >= res.maxPage) return false;
-      page += 1;
-      return step();
-    }).catch(function (err) {
-      log('search failed (' + query + ' p' + page + '): ' + (err && err.message));
-      return false;
-    });
-  }
-  return step();
-}
-
-function searchQueries(queries, onEntries, afterQuery) {
-  var qi = 0;
-  function nextQuery() {
-    if (qi >= queries.length) return Promise.resolve(false);
-    return searchPages(queries[qi++], onEntries).then(function (stop) {
-      if (stop || (afterQuery && afterQuery())) return true;
-      return nextQuery();
-    });
-  }
-  return nextQuery();
-}
-
-// ─────────────────────────────── Movies ───────────────────────────────
-
-function scoreMovieEntry(entry, meta) {
-  var info = parseTitle(entry.title);
-  if (info.kind !== 'movie' && info.kind !== 'play') return null;
-  if (meta.arabic && (info.dubbed || info.subbed)) return null;
-
-  var yearDiff = meta.year && info.year ? Math.abs(meta.year - info.year) : null;
-  if (yearDiff !== null && yearDiff > 1) return null;
-
-  var base = 0;
-  meta.targets.forEach(function (target) {
-    if (info.name === target) {
-      base = Math.max(base, 100);
-    } else if (yearDiff !== null && numberTokens(info.name) === numberTokens(target) && diceScore(info.name, target) >= 0.9) {
-      base = Math.max(base, 80);
-    }
-  });
-  if (!base) return null;
-
-  return {
-    vid: entry.vid,
-    title: entry.title,
-    year: info.year,
-    score: base + (yearDiff === 0 ? 10 : yearDiff === 1 ? 5 : 0),
-    confident: base === 100 && (yearDiff !== null || !meta.year)
-  };
-}
-
-function findMovieCandidates(meta) {
-  var found = [];
-  var seen = {};
-  var queries = [];
-  meta.queries.forEach(function (q, i) {
-    queries.push(q);
-    if (i === 0 && meta.year) queries.push(q + ' ' + meta.year);
-  });
-
-  function onEntries(entries) {
-    var confident = false;
-    entries.forEach(function (entry) {
-      if (seen[entry.vid]) return;
-      var scored = scoreMovieEntry(entry, meta);
-      if (!scored) return;
-      seen[entry.vid] = true;
-      scored.order = found.length;
-      found.push(scored);
-      if (scored.confident) confident = true;
-    });
-    return confident;
-  }
-
-  return searchQueries(queries, onEntries, function () { return found.length > 0; }).then(function () {
-    return found.sort(function (a, b) { return (b.score - a.score) || (a.order - b.order); });
-  });
-}
-
-function yearAcceptable(candidate, meta) {
-  if (candidate.year || !meta.year) return Promise.resolve(true);
-  return siteGet(BASE_URL + '/watch.php?vid=' + candidate.vid).then(function (html) {
-    var head = [];
-    var desc = /<meta[^>]+name=["']description["'][^>]*>/i.exec(html);
-    var title = /<title>([^<]*)<\/title>/i.exec(html);
-    if (desc) head.push(getAttr(desc[0], 'content'));
-    if (title) head.push(title[1]);
-    var years = (toWesternDigits(decodeEntities(head.join(' '))).match(/\b(?:19|20)\d\d\b/g) || []).map(Number);
-    if (!years.length) return true;
-    return years.some(function (y) { return Math.abs(y - meta.year) <= 1; });
-  }).catch(function () { return true; });
-}
-
-function getMovieStreams(meta, title) {
-  return findMovieCandidates(meta).then(function (candidates) {
-    log('movie candidates: ' + candidates.map(function (c) { return c.vid + ' (' + c.score + ')'; }).join(', '));
-    var list = candidates.slice(0, MAX_MOVIE_CANDIDATES);
-    var i = 0;
-    function next() {
-      if (i >= list.length) return Promise.resolve([]);
-      var cand = list[i++];
-      return yearAcceptable(cand, meta).then(function (ok) {
-        if (!ok) return next();
-        return getServerStreams(cand.vid, title).catch(function (err) {
-          log('servers failed for ' + cand.vid + ': ' + (err && err.message));
-          return [];
-        }).then(function (streams) {
-          return streams.length ? streams : next();
-        });
-      });
-    }
-    return next();
-  });
-}
-
-// ─────────────────────────────── Series ───────────────────────────────
-
-function matchSeriesName(name, targets) {
-  for (var i = 0; i < targets.length; i++) {
-    var t = targets[i];
-    if (name === t) return { matched: true, trailingSeason: null };
-    if (name.indexOf(t + ' ') === 0) {
-      var rest = name.slice(t.length + 1);
-      if (/^\d{1,2}$/.test(rest)) return { matched: true, trailingSeason: parseInt(rest, 10) };
-    }
-  }
-  return { matched: false, trailingSeason: null };
-}
-
-function findSeriesEntries(meta, season) {
-  var matched = [];
-  var seen = {};
-
-  function onEntries(entries) {
-    entries.forEach(function (entry) {
-      if (seen[entry.vid]) return;
-      var info = parseTitle(entry.title);
-      if (info.kind !== 'series' && info.kind !== 'show') return;
-      if (info.episode === null) return;
-      if (meta.arabic && (info.dubbed || info.subbed)) return;
-      var m = matchSeriesName(info.name, meta.targets);
-      if (!m.matched) return;
-      var entrySeason = info.season || m.trailingSeason || null;
-      if (entrySeason !== null && entrySeason !== season) return;
-      seen[entry.vid] = true;
-      matched.push({ vid: entry.vid, title: entry.title, info: info, entrySeason: entrySeason });
-    });
-    return matched.length > 0;
-  }
-
-  return searchQueries(meta.queries, onEntries).then(function () { return matched; });
-}
-
-function parseSeasons(html) {
-  var headings = [];
-  var hre = />\s*الموسم\s*([0-9\u0660-\u0669]+)\s*</g;
-  var m;
-  while ((m = hre.exec(html)) !== null) {
-    headings.push({ index: m.index, season: parseInt(toWesternDigits(m[1]), 10) });
-  }
-
-  var anchors = parseWatchAnchors(html);
-  var sections = [];
-  var bySeason = {};
-  anchors.forEach(function (a) {
-    var season = 1;
-    headings.forEach(function (h) { if (h.index < a.index) season = h.season; });
-    var episode = a.title ? parseTitle(a.title).episode : null;
-    if (episode === null) {
-      var n = /\d+/.exec(toWesternDigits(a.text));
-      episode = n ? parseInt(n[0], 10) : null;
-    }
-    if (episode === null) return;
-    if (!bySeason[season]) {
-      bySeason[season] = { season: season, episodes: [] };
-      sections.push(bySeason[season]);
-    }
-    bySeason[season].episodes.push({ episode: episode, vid: a.vid });
-  });
-
-  var ambiguous = false;
-  for (var i = 0; i < headings.length - 1; i++) {
-    var between = anchors.filter(function (a) {
-      return a.index > headings[i].index && a.index < headings[i + 1].index;
-    });
-    if (!between.length) ambiguous = true;
-  }
-  return { sections: sections, ambiguous: ambiguous };
-}
-
-function sliceEpisodeBlock(html) {
-  var start = html.indexOf('المواسم والحلقات');
-  if (start === -1) return '';
-  var end = html.length;
-  ['pm-user-header', 'pm-video-posting-info', 'pm-video-description'].forEach(function (marker) {
-    var i = html.indexOf(marker, start);
-    if (i !== -1 && i < end) end = i;
-  });
-  return html.slice(start, end);
-}
-
-function fetchSeriesSections(vid) {
-  var watchUrl = BASE_URL + '/watch.php?vid=' + vid;
-  return siteGet(watchUrl).then(function (html) {
-    var fromWatchPage = function () { return parseSeasons(sliceEpisodeBlock(html)); };
-    var link = /href\s*=\s*["']([^"']*view-serie\.php\?[^"']+)["']/i.exec(html);
-    var serieUrl = link ? absoluteUrl(link[1], BASE_URL) : '';
-    if (!serieUrl) return fromWatchPage();
-    return siteGet(serieUrl, watchUrl).then(function (serieHtml) {
-      var parsed = parseSeasons(serieHtml);
-      return parsed.sections.length ? parsed : fromWatchPage();
-    }, fromWatchPage);
-  });
-}
-
-function pickFromSections(parsed, season, episode, entrySeason) {
-  if (!parsed || parsed.ambiguous) return null;
-  var section = null;
-  parsed.sections.forEach(function (s) { if (s.season === season) section = s; });
-  if (!section && parsed.sections.length === 1 && (season === 1 || entrySeason === season)) {
-    section = parsed.sections[0];
-  }
-  if (!section) return null;
-  for (var i = 0; i < section.episodes.length; i++) {
-    if (section.episodes[i].episode === episode) return section.episodes[i];
-  }
-  return null;
-}
-
-function resolveEpisodeVids(matched, season, episode) {
-  var direct = matched.filter(function (e) {
-    return e.info.episode === episode && (e.entrySeason === season || (e.entrySeason === null && season === 1));
-  });
-  if (direct.length === 1) return Promise.resolve([direct[0].vid]);
-
-  var rep = matched[0];
-  matched.forEach(function (e) { if (rep.entrySeason !== season && e.entrySeason === season) rep = e; });
-
-  return fetchSeriesSections(rep.vid).then(function (parsed) {
-    var hit = pickFromSections(parsed, season, episode, rep.entrySeason);
-    if (hit) return [hit.vid];
-    if (parsed.ambiguous) log('season layout not understood on the series page');
-    return direct.map(function (e) { return e.vid; });
-  }).catch(function (err) {
-    log('series page failed: ' + (err && err.message));
-    return direct.map(function (e) { return e.vid; });
-  });
-}
-
-function getSeriesStreams(meta, season, episode, title) {
-  return findSeriesEntries(meta, season).then(function (matched) {
-    log('series entries matched: ' + matched.length);
-    if (!matched.length) return [];
-    return resolveEpisodeVids(matched, season, episode).then(function (vids) {
-      var list = vids.slice(0, MAX_EPISODE_CANDIDATES);
-      var i = 0;
-      function next() {
-        if (i >= list.length) return Promise.resolve([]);
-        var vid = list[i++];
-        return getServerStreams(vid, title).catch(function (err) {
-          log('servers failed for ' + vid + ': ' + (err && err.message));
-          return [];
-        }).then(function (streams) {
-          return streams.length ? streams : next();
-        });
-      }
-      return next();
-    });
-  });
-}
-
-// ──────────────────────── Servers (play.php) ──────────────────────────
-// FostaTV exposes its mirrors through play.php?vid=<vid> (Ahwak uses see.php).
-
-function fetchEmbedUrls(vid) {
-  return siteGet(BASE_URL + '/play.php?vid=' + vid, BASE_URL + '/watch.php?vid=' + vid).then(function (html) {
-    var urls = [];
+// Search — no filter, we score later
+function searchFosta(title) {
+  var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  var url = BASE + "/search.php?keywords=" + encodeURIComponent(cleanTitle);
+  console.log("[FostaTV] Search:", cleanTitle);
+  return fetchText(url, BASE + "/").then(function(html) {
+    var results = [];
     var seen = {};
-    var baseHost = hostOf(BASE_URL);
-
-    function add(url) {
-      url = absoluteUrl(url, BASE_URL);
-      if (!url || seen[url]) return;
-      if (hostOf(url) === baseHost) return;
-      seen[url] = true;
-      urls.push(url);
+    var re = /<a[^>]*href=["']([^"']*\/watch\.php\?vid=([^"'&]+))["'][^>]*title=["']([^"']+)["'][^>]*>/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var fullUrl = decodeHtml(m[1]);
+      var vid = m[2];
+      var linkTitle = decodeHtml(m[3]);
+      if (seen[vid]) continue;
+      seen[vid] = 1;
+      var absolute = fullUrl.indexOf("http") === 0 ? fullUrl : BASE + fullUrl;
+      results.push({ url: absolute, title: linkTitle, vid: vid });
     }
-
-    function collect(re) {
-      var m;
-      while ((m = re.exec(html)) !== null) add(m[1]);
+    if (!results.length) {
+      var re2 = /<a[^>]*href=["']([^"']*\/watch\.php\?vid=([^"'&]+))["'][^>]*>/gi;
+      while ((m = re2.exec(html)) !== null) {
+        var vid2 = m[2];
+        if (seen[vid2]) continue;
+        seen[vid2] = 1;
+        var abs2 = m[1].indexOf("http") === 0 ? m[1] : BASE + m[1];
+        results.push({ url: abs2, title: "", vid: vid2 });
+      }
     }
-
-    collect(/<iframe\b[^>]*?\ssrc\s*=\s*["']([^"']+)["']/gi);
-    collect(/data-[a-z0-9_-]+\s*=\s*["'](https?:\/\/[^"']+)["']/gi);
-
-    // Loose scan for known FostaTV mirror hosts anywhere in the HTML.
-    var reHost = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com|vkvideo|hgcloud|vidhide|listeamed)[^"'\s<>]*/gi;
-    collect(reHost);
-
-    return urls;
+    console.log("[FostaTV] Search results:", results.length);
+    return results;
   });
 }
-
-function serverLabel(host) {
-  if (/(^|\.)vk\.com$|vkvideo\.ru$/.test(host)) return 'VK';
-  if (/(^|\.)ok\.ru$/.test(host)) return 'OK.ru';
-  if (/uqload/.test(host)) return 'Uqload';
-  if (/vidmoly/.test(host)) return 'Vidmoly';
-  if (/1vid/.test(host)) return '1vid';
-  if (/mixdrop|mxdrop/.test(host)) return 'Mixdrop';
-  if (/vidspeed/.test(host)) return 'Vidspeed';
-  if (/hgcloud/.test(host)) return 'HGCloud';
-  if (/vidhide/.test(host)) return 'VidHide';
-  if (/playmogo/.test(host)) return 'Playmogo';
-  if (/ds2play/.test(host)) return 'DS2Play';
-  if (/dood/.test(host)) return 'Dood';
-  if (/voe\.sx|voe\./.test(host)) return 'Voe';
-  if (/filemoon/.test(host)) return 'Filemoon';
-  if (/streamtape/.test(host)) return 'Streamtape';
-  if (/listeamed/.test(host)) return 'Listeamed';
-  if (/sendvid/.test(host)) return 'Sendvid';
-  if (/mp4upload/.test(host)) return 'MP4Upload';
-  if (/sibnet/.test(host)) return 'Sibnet';
-  if (/upstream/.test(host)) return 'Upstream';
-  return host.split('.').slice(-2, -1)[0] || host;
-}
-
-// ───────────────────────────── Extractors ─────────────────────────────
-
-var QUALITY_RANK_AUTO = 1080;
 
 function qualityFromUrl(url) {
   var s = String(url).toLowerCase();
-  if (/2160|4k/.test(s)) return '2160p';
-  if (/1440/.test(s)) return '1440p';
-  if (/1080/.test(s)) return '1080p';
-  if (/720/.test(s)) return '720p';
-  if (/480/.test(s)) return '480p';
-  if (/360/.test(s)) return '360p';
-  if (/240/.test(s)) return '240p';
-  var m = /(\d{3,4})p\b/i.exec(s);
-  return m ? m[1] + 'p' : null;
+  if (/2160|4k/.test(s)) return "4K";
+  if (/1080/.test(s)) return "1080p";
+  if (/720/.test(s)) return "720p";
+  if (/480/.test(s)) return "480p";
+  return "Auto";
 }
 
-function cleanMediaUrl(url) {
-  return String(url)
-    .replace(/\\u0026/gi, '&')
-    .replace(/\\\//g, '/')
-    .replace(/&amp;/g, '&')
-    .trim();
+function hostLabel(url) {
+  var m = String(url || "").match(/^https?:\/\/(?:www\.)?([^\.\/]+)/i);
+  return m ? m[1] : "Server";
 }
 
-// Dean Edwards p.a.c.k.e.r unpacker (1vid, Vidspeed, HGCloud, Mixdrop...).
-function unpackAll(text) {
+function makeStream(url, label, referer, type) {
+  if (url.indexOf("http://") === 0) url = "https://" + url.slice(7);
+  var t = type || "iframe";
+  if (/\.m3u8/i.test(url)) t = "hls";
+  else if (/\.mp4/i.test(url)) t = "mp4";
+  return {
+    name: "⚜️ FostaTV",
+    title: label ? "⚜️ FostaTV \u2022 " + label : "⚜️ FostaTV",
+    url: url,
+    quality: qualityFromUrl(url),
+    type: t,
+    referer: referer || BASE + "/",
+    headers: { "User-Agent": UA, "Referer": referer || BASE + "/" }
+  };
+}
+
+// Extract every embed URL from play.php — iframes + data-* + known hosts
+function extractEmbedUrls(html) {
   var out = [];
-  if (text.indexOf('p,a,c,k,e') === -1) return out;
-  var digits = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  var patterns = [
-    /\}\(\s*'((?:[^'\\]|\\[\s\S])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:[^'\\]|\\[\s\S])*)'\s*\.split\(\s*'\|'\s*\)/g,
-    /\}\(\s*"((?:[^"\\]|\\[\s\S])*)"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"((?:[^"\\]|\\[\s\S])*)"\s*\.split\(\s*"\|"\s*\)/g
-  ];
-  patterns.forEach(function (re) {
-    var m;
-    while ((m = re.exec(text)) !== null) {
-      var radix = parseInt(m[2], 10);
-      var words = m[4].split('|');
-      var payload = m[1].replace(/\\\\/g, '\\').replace(/\\'/g, "'").replace(/\\"/g, '"');
-      out.push(payload.replace(/\b\w+\b/g, function (w) {
-        var n = 0;
-        for (var i = 0; i < w.length; i++) {
-          var d = digits.indexOf(w.charAt(i));
-          if (d < 0 || d >= radix) return w;
-          n = n * radix + d;
-        }
-        return words[n] ? words[n] : w;
-      }));
-    }
-  });
+  var seen = {};
+  function add(u) {
+    u = decodeHtml(String(u || "").trim());
+    if (u.indexOf("//") === 0) u = "https:" + u;
+    else if (u.charAt(0) === "/") u = BASE + u;
+    if (!/^https?:/i.test(u)) return;
+    if (/googletagmanager|google\.|facebook|histats|pamphiltre|cloudflare|adcash|monetag|propeller|popads|amazon|gstatic|jquery|w3\.org|schema\.org/i.test(u)) return;
+    if (seen[u]) return;
+    seen[u] = 1;
+    out.push(u);
+  }
+  var m;
+  var reIf = /<iframe[^>]*src=["']([^"']+)["']/gi;
+  while ((m = reIf.exec(html)) !== null) add(m[1]);
+  var reData = /data-[a-z0-9_-]+=["'](https?:\/\/[^"']+)["']/gi;
+  while ((m = reData.exec(html)) !== null) add(m[1]);
+  var reAny = /https?:\/\/[^"'\s<>]*(?:1vid|vidmoly|playmogo|uqload|dood|voe|streamtape|filemoon|upstream|mp4upload|sendvid|sibnet|mixdrop|ds2play|vidspeed|ok\.ru|vk\.com|hgcloud|vidhidehub|listeamed)[^"'\s<>]*/gi;
+  while ((m = reAny.exec(html)) !== null) add(m[0]);
   return out;
 }
 
-var BAD_ASSET = /\.(?:jpe?g|png|gif|webp|vtt|srt|css|js|json|html?)(?:[?#]|$)/i;
+// === RESOLVERS (same as Ahwak) ===
 
-function scanMediaUrls(text, baseUrl) {
-  var patterns = [
-    /sources\s*:\s*\[\s*\{\s*["']?file["']?\s*:\s*["']([^"']+)["']/gi,
-    /sources\s*:\s*\[\s*["']([^"']+)["']/gi,
-    /["']?file["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi,
-    /["']hls\d*["']\s*:\s*["']([^"']+)["']/gi,
-    /wurl\s*=\s*["']([^"']+)["']/gi,
-    /["'](https?:\\?\/\\?\/[^"'\s]+?\.(?:m3u8|mp4)[^"'\s]*)["']/gi
-  ];
-  var found = [];
-  var seen = {};
-  patterns.forEach(function (re) {
-    var m;
-    while ((m = re.exec(text)) !== null) {
-      var url = absoluteUrl(cleanMediaUrl(m[1]), baseUrl);
-      if (!url || seen[url] || BAD_ASSET.test(url)) continue;
-      seen[url] = true;
-      found.push(url);
-    }
-  });
-  return found;
+function resolveVidMoly(embedUrl) {
+  return fetch(embedUrl, {
+    headers: { "User-Agent": UA, "Referer": BASE + "/" },
+    redirect: "follow"
+  })
+    .then(function(r) { return r.text(); })
+    .then(function(html) {
+      var m = html.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*['"]([^'"]+)['"]/i);
+      if (!m) m = html.match(/file\s*:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)['"]/i);
+      if (!m) return [];
+      return [makeStream(m[1].replace(/\\\//g, "/"), "VidMoly", "https://vidmoly.to/", "hls")];
+    })
+    .catch(function(e) { console.log("[FostaTV] VidMoly err:", e.message); return []; });
 }
 
-function embedHeaders(embedUrl) {
-  var origin = originOf(embedUrl);
-  return { 'User-Agent': UA_EMBED, 'Referer': origin + '/', 'Origin': origin };
-}
-
-function extractGeneric(embedUrl) {
-  return fetchText(embedUrl, { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/', 'Accept-Language': 'ar,en;q=0.9' }, EMBED_TIMEOUT)
-    .then(function (html) {
-      var texts = [html].concat(unpackAll(html));
-      var urls = [];
-      texts.forEach(function (t) {
-        scanMediaUrls(t, embedUrl).forEach(function (u) { if (urls.indexOf(u) === -1) urls.push(u); });
-      });
-      var headers = embedHeaders(embedUrl);
-      return urls.map(function (u) {
-        var isHls = /\.m3u8/i.test(u);
-        return { url: u, quality: isHls ? 'Auto' : (qualityFromUrl(u) || 'Unknown'), headers: headers };
-      });
-    });
-}
-
-// Dood-style (Dood, Playmogo, Uqload, DS2Play, Vidspeed): two-step pass_md5 handshake.
-function extractDood(embedUrl) {
-  return fetchText(embedUrl, { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/', 'Accept-Language': 'ar,en;q=0.9' }, EMBED_TIMEOUT)
-    .then(function (html) {
+function resolveDood(embedUrl) {
+  return fetch(embedUrl, {
+    headers: { "User-Agent": UA, "Referer": BASE + "/" },
+    redirect: "follow"
+  })
+    .then(function(r) { return r.text(); })
+    .then(function(html) {
       var pm = html.match(/["'](\/pass_md5\/[^"']+)["']/i);
       if (!pm) return [];
-      var tk = pm[1].match(/\/pass_md5\/([^\/?#]+)/);
-      var token = tk ? tk[1] : '';
+      var tk = pm[1].match(/\/pass_md5\/([^\/]+)/);
+      var token = tk ? tk[1] : "";
       var exm = html.match(/[?&]expiry=([0-9]+)/i);
       var expiry = exm ? exm[1] : String(Math.floor(Date.now() / 1000) + 3600);
-      var origin = originOf(embedUrl);
-      return fetchText(origin + pm[1], { 'User-Agent': UA_EMBED, 'Referer': embedUrl }, EMBED_TIMEOUT)
-        .then(function (base) {
-          base = String(base || '').trim();
-          if (!base || base.length < 10 || !/^https?:/i.test(base)) return [];
-          var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-          var rnd = '';
+      var om = embedUrl.match(/^(https?:\/\/[^\/]+)/);
+      var origin = om ? om[1] : "";
+      return fetch(origin + pm[1], {
+        headers: { "User-Agent": UA, "Referer": embedUrl },
+        redirect: "follow"
+      })
+        .then(function(pr) { return pr.text(); })
+        .then(function(base) {
+          if (!base || base.length < 10) return [];
+          var chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+          var rnd = "";
           for (var i = 0; i < 10; i++) rnd += chars.charAt(Math.floor(Math.random() * chars.length));
-          var finalUrl = base + rnd + '?token=' + token + '&expiry=' + expiry;
-          var headers = { 'User-Agent': UA_EMBED, 'Referer': origin + '/' };
-          return [{ url: finalUrl, quality: qualityFromUrl(finalUrl) || 'Unknown', headers: headers }];
+          return [makeStream(base + rnd + "?token=" + token + "&expiry=" + expiry, "Dood", embedUrl, "mp4")];
         });
-    });
+    })
+    .catch(function(e) { console.log("[FostaTV] Dood err:", e.message); return []; });
 }
 
-function extractVk(embedUrl) {
-  return fetchText(embedUrl, { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/', 'Accept-Language': 'ar,en;q=0.9' }, EMBED_TIMEOUT)
-    .then(function (html) {
-      var headers = { 'User-Agent': UA_EMBED, 'Referer': 'https://vk.com/' };
-      var out = [];
-      var re = /"url(\d{3,4})"\s*:\s*"(https?:[^"]+)"/g;
-      var m;
-      while ((m = re.exec(html)) !== null) {
-        out.push({ url: cleanMediaUrl(m[2]), quality: m[1] + 'p', headers: headers });
-      }
-      if (!out.length) {
-        var hls = /"hls"\s*:\s*"(https?:[^"]+)"/.exec(html);
-        if (hls) out.push({ url: cleanMediaUrl(hls[1]), quality: 'Auto', headers: headers });
-      }
-      return out;
-    });
+function unpackEval(html) {
+  var m = html.match(/eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/);
+  if (!m) return null;
+  var payload = m[1];
+  var base = parseInt(m[2], 10);
+  var count = parseInt(m[3], 10);
+  var kw = m[4].split("|");
+  var i = count;
+  while (i--) {
+    if (kw[i]) payload = payload.replace(new RegExp("\\b" + i.toString(base) + "\\b", "g"), kw[i]);
+  }
+  return payload;
 }
 
-var OK_QUALITY = { mobile: '144p', lowest: '240p', low: '360p', sd: '480p', hd: '720p', full: '1080p', quad: '1440p', ultra: '2160p' };
+function resolve1Vid(embedUrl) {
+  return fetch(embedUrl, {
+    headers: { "User-Agent": UA, "Referer": BASE + "/" },
+    redirect: "follow"
+  })
+    .then(function(r) { return r.text(); })
+    .then(function(html) {
+      var unpacked = unpackEval(html) || html;
+      var m = unpacked.match(/https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4)[^"'\s<>\\]*/i);
+      if (!m) return [];
+      var url = m[0].replace(/\\\//g, "/");
+      return [makeStream(url, "1Vid", embedUrl, /\.m3u8/i.test(url) ? "hls" : "mp4")];
+    })
+    .catch(function(e) { console.log("[FostaTV] 1Vid err:", e.message); return []; });
+}
 
-function extractOk(embedUrl) {
-  return fetchText(embedUrl, { 'User-Agent': UA_EMBED, 'Referer': BASE_URL + '/', 'Accept-Language': 'ar,en;q=0.9' }, EMBED_TIMEOUT)
-    .then(function (html) {
-      var headers = { 'User-Agent': UA_EMBED, 'Referer': 'https://ok.ru/' };
-      var out = [];
-
-      // Preferred: data-options JSON (Ahwak style).
-      var m = /data-options\s*=\s*"([^"]+)"/.exec(html);
-      if (m) {
-        try {
-          var options = JSON.parse(decodeEntities(m[1]));
-          var meta = options && options.flashvars && options.flashvars.metadata;
-          if (typeof meta === 'string') meta = JSON.parse(meta);
-          if (meta) {
-            (meta.videos || []).forEach(function (v) {
-              if (v && v.url) out.push({ url: cleanMediaUrl(v.url), quality: OK_QUALITY[v.name] || 'Unknown', headers: headers });
-            });
-            var hls = meta.hlsManifestUrl || meta.ondemandHls || meta.hlsMasterPlaylistUrl;
-            if (hls) out.push({ url: cleanMediaUrl(hls), quality: 'Auto', headers: headers });
-            if (out.length) return out;
-          }
-        } catch (e) { /* fall through */ }
-      }
-
-      // Fallback: raw JSON fields.
-      var mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(html);
-      if (mm) return [{ url: cleanMediaUrl(mm[1]), quality: 'Auto', headers: headers }];
-      mm = /"videoUrl"\s*:\s*"([^"]+)"/i.exec(html);
-      if (mm) return [{ url: cleanMediaUrl(mm[1]), quality: qualityFromUrl(mm[1]) || 'Unknown', headers: headers }];
-      mm = /"url(\d{3,4})"\s*:\s*"(https?:[^"]+)"/g;
-      var r;
-      while ((r = mm.exec(html)) !== null) {
-        out.push({ url: cleanMediaUrl(r[2]), quality: r[1] + 'p', headers: headers });
-      }
-      return out;
-    });
+function resolveOkRu(embedUrl) {
+  return fetch(embedUrl, {
+    headers: { "User-Agent": UA, "Referer": BASE + "/" },
+    redirect: "follow"
+  })
+    .then(function(r) { return r.text(); })
+    .then(function(html) {
+      var m = html.match(/"hlsManifestUrl":"([^"]+)"/i);
+      if (m) return [makeStream(m[1].replace(/\\\//g, "/"), "OK.ru", "https://ok.ru/", "hls")];
+      m = html.match(/"videoUrl":"([^"]+)"/i);
+      if (m) return [makeStream(m[1].replace(/\\\//g, "/"), "OK.ru", "https://ok.ru/", "mp4")];
+      m = html.match(/url[0-9]{3}["']?\s*[:=]\s*["']([^"']+)["']/);
+      if (m) return [makeStream(m[1].replace(/\\\//g, "/"), "OK.ru", "https://ok.ru/", "mp4")];
+      return [];
+    })
+    .catch(function(e) { console.log("[FostaTV] OK.ru err:", e.message); return []; });
 }
 
 function resolveEmbed(embedUrl) {
-  var host = hostOf(embedUrl);
-  var job;
-  if (/(^|\.)vk\.com$|(^|\.)vkvideo\.ru$/.test(host)) job = extractVk(embedUrl);
-  else if (/(^|\.)ok\.ru$/.test(host)) job = extractOk(embedUrl);
-  else if (/dood|playmogo|uqload|ds2play|vidspeed/.test(host)) job = extractDood(embedUrl);
-  else job = extractGeneric(embedUrl);
-
-  return job.then(function (items) {
-    var label = serverLabel(host);
-    return items.map(function (it) { it.server = label; return it; });
-  }).catch(function (err) {
-    log(serverLabel(host) + ' failed: ' + (err && err.message));
-    return [];
-  });
+  var host = hostLabel(embedUrl).toLowerCase();
+  if (host.indexOf("vidmoly") !== -1) return resolveVidMoly(embedUrl);
+  if (host.indexOf("playmogo") !== -1 || host.indexOf("dood") !== -1 ||
+      host.indexOf("uqload") !== -1 || host.indexOf("ds2play") !== -1 ||
+      host.indexOf("vidspeed") !== -1) return resolveDood(embedUrl);
+  if (host.indexOf("1vid") !== -1) return resolve1Vid(embedUrl);
+  if (host.indexOf("ok.ru") !== -1 || host.indexOf("okru") !== -1) return resolveOkRu(embedUrl);
+  return Promise.resolve([]);
 }
 
-// ─────────────────────────── Stream assembly ──────────────────────────
-
-function qualityRank(q) {
-  if (q === 'Auto') return QUALITY_RANK_AUTO;
-  var n = parseInt(q, 10);
-  return isNaN(n) ? 0 : n;
+// Is this a real embed host or a dummy/placeholder?
+function isRealEmbed(url) {
+  var h = hostLabel(url).toLowerCase();
+  // Known real hosts
+  if (/vidmoly|playmogo|uqload|ds2play|vidspeed|dood|1vid|ok\.ru|okru|vk\.com|hgcloud|vidhidehub|listeamed|mixdrop|voe\.sx|filemoon|streamtape/.test(h)) return true;
+  // Placeholder hosts to skip
+  if (/^vid[0-9]+\.0$|^0\.0$|placeholder|dummy|example|localhost|127\.0\.0\.1/.test(h)) return false;
+  // Unknown — keep, resolver may or may not handle it
+  return true;
 }
 
-function getServerStreams(vid, title) {
-  return fetchEmbedUrls(vid).then(function (embedUrls) {
-    log('servers for ' + vid + ': ' + embedUrls.length);
-    return Promise.all(embedUrls.map(resolveEmbed));
-  }).then(function (groups) {
-    var streams = [];
-    var seen = {};
-    groups.forEach(function (items) {
-      items.forEach(function (it) {
-        if (seen[it.url]) return;
-        seen[it.url] = true;
-        streams.push({
-          name: PROVIDER_NAME + ' ' + it.server + (it.quality !== 'Unknown' ? ' ' + it.quality : ''),
-          title: title,
-          url: it.url,
-          quality: it.quality,
-          size: 'Unknown',
-          headers: it.headers,
-          provider: PROVIDER_ID
+// Given a watch vid, fetch play.php → embeds → resolve → streams
+function resolveVid(vid) {
+  var watchUrl = BASE + "/watch.php?vid=" + vid;
+  var playUrl = BASE + "/play.php?vid=" + vid;
+  console.log("[FostaTV] play:", playUrl);
+  return fetchText(playUrl, watchUrl).then(function(playHtml) {
+    var embeds = extractEmbedUrls(playHtml).filter(isRealEmbed);
+    console.log("[FostaTV] embeds:", embeds.length, "[" + embeds.map(hostLabel).join(", ") + "]");
+    if (!embeds.length) return [];
+    return Promise.all(embeds.map(function(e) {
+      return resolveEmbed(e).catch(function() { return []; });
+    })).then(function(groups) {
+      var streams = [];
+      var seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(s) {
+          if (seen[s.url]) return;
+          seen[s.url] = 1;
+          streams.push(s);
         });
       });
+      console.log("[FostaTV] resolved streams:", streams.length);
+      return streams;
     });
-    streams.sort(function (a, b) { return qualityRank(b.quality) - qualityRank(a.quality); });
-    return streams;
   });
 }
 
-// ───────────────────────────── Entry point ────────────────────────────
+function getMovieStreams(tmdbId) {
+  return getTmdbTitles(tmdbId, "movie").then(function(titles) {
+    if (!titles.length) return [];
+    return Promise.all(titles.map(function(t) {
+      return searchFosta(t).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [], seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.vid]) { seen[r.vid] = 1; all.push(r); }
+        });
+      });
+      console.log("[FostaTV] Total candidates:", all.length);
+      if (!all.length) return [];
 
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-  var type = mediaType === 'tv' || mediaType === 'series' ? 'tv' : 'movie';
-  var season = parseInt(seasonNum, 10) || 1;
-  var episode = parseInt(episodeNum, 10) || 1;
+      // Jaccard scoring
+      function jaccard(candidateTitle) {
+        var cleaned = candidateTitle
+          .replace(/^(مسلسل|فيلم|مسرحية|برنامج)\s+/i, "")
+          .replace(/\s*الحلق[ةه].*$/i, "")
+          .replace(/\s*كامل.*$/i, "")
+          .replace(/\s*HD.*$/i, "")
+          .trim();
+        var candTokens = normalizeArabic(cleaned).split(/\s+/).filter(function(w) { return w.length > 1; });
+        if (!candTokens.length) return 0;
+        var setB = {};
+        candTokens.forEach(function(w) { setB[w] = 1; });
+        var best = 0;
+        titles.forEach(function(t) {
+          var titleTokens = normalizeArabic(t).split(/\s+/).filter(function(w) { return w.length > 1; });
+          if (!titleTokens.length) return;
+          var inter = 0;
+          var setA = {};
+          titleTokens.forEach(function(w) { setA[w] = 1; if (setB[w]) inter++; });
+          var unionSet = {};
+          titleTokens.forEach(function(w) { unionSet[w] = 1; });
+          candTokens.forEach(function(w) { unionSet[w] = 1; });
+          var union = Object.keys(unionSet).length;
+          var j = union ? inter / union : 0;
+          if (j > best) best = j;
+        });
+        return best;
+      }
 
-  if (!TMDB_API_KEY || TMDB_API_KEY === 'YOUR_TMDB_API_KEY') {
-    log('TMDB_API_KEY is not set');
-    return Promise.resolve([]);
-  }
+      var scored = all.map(function(r) {
+        return Object.assign({}, r, { jaccard: jaccard(r.title) });
+      });
+      console.log("[FostaTV] Scored:",
+        scored.slice(0, 5).map(function(c) { return "[" + c.jaccard.toFixed(2) + "] " + c.title.slice(0, 40); }).join(" | "));
 
-  return fetchTmdb(tmdbId, type).then(function (data) {
-    var meta = buildMeta(data, type);
-    if (ARABIC_ONLY && !meta.arabic) {
-      log('skipped (not Arabic content): ' + meta.displayTitle);
-      return [];
-    }
-    if (!meta.targets.length) {
-      log('no usable title for TMDB ' + tmdbId);
-      return [];
-    }
-    var title = type === 'tv'
-      ? meta.displayTitle + ' S' + pad2(season) + 'E' + pad2(episode)
-      : meta.displayTitle + (meta.year ? ' (' + meta.year + ')' : '');
-    log(type + ' "' + meta.displayTitle + '" queries=' + JSON.stringify(meta.queries));
-    return type === 'tv' ? getSeriesStreams(meta, season, episode, title) : getMovieStreams(meta, title);
-  }).catch(function (err) {
-    log('error: ' + (err && err.message));
+      var filtered = scored.filter(function(c) { return c.jaccard >= 0.40; });
+      console.log("[FostaTV] After filter:", filtered.length, "candidates >= 0.40");
+      if (!filtered.length) return [];
+
+      filtered.sort(function(a, b) { return b.jaccard - a.jaccard; });
+
+      // Try top 5, return FIRST success (no leak)
+      var triedVids = {};
+      function tryNext(i) {
+        if (i >= filtered.length || Object.keys(triedVids).length >= 5) return Promise.resolve([]);
+        var c = filtered[i];
+        if (triedVids[c.vid]) return tryNext(i + 1);
+        triedVids[c.vid] = 1;
+        console.log("[FostaTV] Trying " + c.vid + " (" + c.jaccard.toFixed(2) + ")");
+        return resolveVid(c.vid).then(function(streams) {
+          if (streams.length) {
+            console.log("[FostaTV] ✓ " + streams.length + " streams from " + c.vid);
+            return streams;
+          }
+          return tryNext(i + 1);
+        });
+      }
+      return tryNext(0);
+    });
+  }).catch(function(err) {
+    console.log("[FostaTV] Movie error:", err.message);
     return [];
   });
+}
+
+function getTvStreams(tmdbId, season, episode) {
+  var wanted = Number(episode) || 1;
+  return getTmdbTitles(tmdbId, "tv").then(function(titles) {
+    if (!titles.length) return [];
+    var searches = [];
+    titles.forEach(function(t) {
+      searches.push(t + " الحلقة " + wanted);
+      searches.push(t);
+    });
+    return Promise.all(searches.map(function(q) {
+      return searchFosta(q).catch(function() { return []; });
+    })).then(function(groups) {
+      var all = [], seen = {};
+      groups.forEach(function(g) {
+        g.forEach(function(r) {
+          if (!seen[r.vid]) { seen[r.vid] = 1; all.push(r); }
+        });
+      });
+      console.log("[FostaTV] TV candidates:", all.length);
+      if (!all.length) return [];
+
+      function jaccard(candidateTitle) {
+        var cleaned = candidateTitle
+          .replace(/^(مسلسل|فيلم|مسرحية|برنامج)\s+/i, "")
+          .replace(/\s*الحلق[ةه].*$/i, "")
+          .replace(/\s*كامل.*$/i, "")
+          .replace(/\s*HD.*$/i, "")
+          .trim();
+        var candTokens = normalizeArabic(cleaned).split(/\s+/).filter(function(w) { return w.length > 1; });
+        if (!candTokens.length) return 0;
+        var setB = {};
+        candTokens.forEach(function(w) { setB[w] = 1; });
+        var best = 0;
+        titles.forEach(function(t) {
+          var titleTokens = normalizeArabic(t).split(/\s+/).filter(function(w) { return w.length > 1; });
+          if (!titleTokens.length) return;
+          var inter = 0;
+          var setA = {};
+          titleTokens.forEach(function(w) { setA[w] = 1; if (setB[w]) inter++; });
+          var unionSet = {};
+          titleTokens.forEach(function(w) { unionSet[w] = 1; });
+          candTokens.forEach(function(w) { unionSet[w] = 1; });
+          var union = Object.keys(unionSet).length;
+          var j = union ? inter / union : 0;
+          if (j > best) best = j;
+        });
+        return best;
+      }
+
+      var scored = all.map(function(r) {
+        var j = jaccard(r.title);
+        var epNum = null;
+        var em = r.title.match(/الحلق[ةه]\s*([0-9\u0660-\u0669]+)/);
+        if (em) {
+          epNum = parseInt(em[1].replace(/[\u0660-\u0669]/g, function(d) { return String(d.charCodeAt(0) - 0x0660); }), 10);
+        }
+        return Object.assign({}, r, { jaccard: j, epNum: epNum });
+      });
+
+      var exact = scored.filter(function(c) { return c.jaccard >= 0.40 && c.epNum === wanted; });
+      var filtered = exact.length ? exact : scored.filter(function(c) { return c.jaccard >= 0.40; });
+      console.log("[FostaTV] TV after filter:", filtered.length, "(exact ep:", exact.length + ")");
+      if (!filtered.length) return [];
+
+      filtered.sort(function(a, b) { return b.jaccard - a.jaccard; });
+
+      var triedVids = {};
+      function tryNext(i) {
+        if (i >= filtered.length || Object.keys(triedVids).length >= 5) return Promise.resolve([]);
+        var c = filtered[i];
+        if (triedVids[c.vid]) return tryNext(i + 1);
+        triedVids[c.vid] = 1;
+        console.log("[FostaTV] Trying " + c.vid + " (" + c.jaccard.toFixed(2) + ")");
+        return resolveVid(c.vid).then(function(streams) {
+          if (streams.length) {
+            console.log("[FostaTV] ✓ " + streams.length + " streams from " + c.vid);
+            return streams;
+          }
+          return tryNext(i + 1);
+        });
+      }
+      return tryNext(0);
+    });
+  }).catch(function(err) {
+    console.log("[FostaTV] TV error:", err.message);
+    return [];
+  });
+}
+
+function getStreams(tmdbId, mediaType, season, episode) {
+  console.log("[FostaTV] getStreams:", tmdbId, mediaType, season, episode);
+  if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
+  return getMovieStreams(tmdbId);
 }
 
 module.exports = { getStreams: getStreams };
