@@ -5,15 +5,10 @@ var PROVIDER_NAME = '💛 AhwakTV';
 // Free key from https://www.themoviedb.org/settings/api
 var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
 
-// ───────────────────────── Content language filter ─────────────────────
-// 'arabic'  = only Arabic-original content
-// 'english' = only English-original content
-// 'both'    = both Arabic and English content (default)
-var CONTENT_LANG = 'both';
-
-// true  = skip dubbed / subtitled uploads for Arabic content
-//         (zero cross-talk with foreign titles)
-var SKIP_DUB_SUB_ARABIC = true;
+// true  = only handle TMDB items whose original language is Arabic and skip
+//         dubbed / subtitled uploads (zero cross-talk with foreign titles).
+// false = also try foreign titles (matched by their Latin title).
+var ARABIC_ONLY = true;
 
 var MAX_SEARCH_PAGES = 3;
 var MAX_MOVIE_CANDIDATES = 3;
@@ -97,24 +92,16 @@ function pad2(n) {
 // ────────────────────────── Title vocabulary ──────────────────────────
 
 var KIND_BY_WORD = {};
-[
-  // Arabic kind words
-  ['فيلم', 'movie'], ['مسرحية', 'play'], ['مسلسل', 'series'], ['انمي', 'series'], ['برنامج', 'show'],
-  // English kind words (robustness; the site normally uses Arabic markers)
-  ['movie', 'movie'], ['film', 'movie'], ['play', 'play'], ['series', 'series'], ['show', 'show'], ['anime', 'series']
-].forEach(function (p) { KIND_BY_WORD[normalizeText(p[0])] = p[1]; });
+[['فيلم', 'movie'], ['مسرحية', 'play'], ['مسلسل', 'series'], ['انمي', 'series'], ['برنامج', 'show']]
+  .forEach(function (p) { KIND_BY_WORD[normalizeText(p[0])] = p[1]; });
 
-var DUB_WORDS = normalizedSet(['مدبلج', 'مدبلجة', 'dubbed', 'dub']);
-var SUB_WORDS = normalizedSet(['مترجم', 'مترجمة', 'subtitled', 'subbed', 'sub']);
-var SEASON_WORDS = normalizedSet(['الموسم', 'الجزء', 'season']);
-var EPISODE_WORDS = normalizedSet(['الحلقة', 'episode', 'ep']);
+var DUB_WORDS = normalizedSet(['مدبلج', 'مدبلجة']);
+var SUB_WORDS = normalizedSet(['مترجم', 'مترجمة']);
+var SEASON_WORDS = normalizedSet(['الموسم', 'الجزء']);
+var EPISODE_WORD = normalizeText('الحلقة');
 var NOISE_WORDS = normalizedSet([
-  // Arabic noise
   'كامل', 'كاملة', 'hd', 'fhd', 'uhd', '4k', 'bluray', 'hdrip', 'webrip', '720p', '1080p',
-  'بجودة', 'جودة', 'عالية', 'اون', 'لاين', 'اونلاين', 'مشاهدة', 'مباشرة', 'يوتيوب',
-  // English noise
-  'complete', 'full', 'watch', 'online', 'streaming', 'blu-ray', 'web-rip',
-  'quality', 'high', 'youtube'
+  'بجودة', 'جودة', 'عالية', 'اون', 'لاين', 'اونلاين', 'مشاهدة', 'مباشرة', 'يوتيوب'
 ]);
 
 var ORDINALS = {};
@@ -132,20 +119,10 @@ function numberFromToken(token) {
 
 // "مسلسل X الموسم الثاني الحلقة 4 الرابعة HD" -> structured info.
 // "فيلم X 2019 كامل HD"                       -> structured info.
-// "مشاهدة فيلم Johnny English 2003 مترجم"     -> structured info (kind detected on 2nd token).
 function parseTitle(raw) {
   var info = { kind: null, name: '', year: null, season: null, episode: null, dubbed: false, subbed: false };
   var tokens = normalizeText(raw).split(' ').filter(Boolean);
-
-  // Scan the first few tokens for a kind word; handles "مشاهدة فيلم ..." prefixes.
-  var kindIdx = -1;
-  for (var k = 0; k < Math.min(tokens.length, 3); k++) {
-    if (KIND_BY_WORD[tokens[k]]) { kindIdx = k; break; }
-  }
-  if (kindIdx !== -1) {
-    info.kind = KIND_BY_WORD[tokens[kindIdx]];
-    tokens.splice(kindIdx, 1);
-  }
+  if (tokens.length && KIND_BY_WORD[tokens[0]]) info.kind = KIND_BY_WORD[tokens.shift()];
 
   tokens = tokens.filter(function (t) {
     if (DUB_WORDS[t]) { info.dubbed = true; return false; }
@@ -154,10 +131,7 @@ function parseTitle(raw) {
   });
 
   if (info.kind === 'series' || info.kind === 'show') {
-    var epIdx = -1;
-    for (var e = 0; e < tokens.length; e++) {
-      if (EPISODE_WORDS[tokens[e]]) { epIdx = e; break; }
-    }
+    var epIdx = tokens.indexOf(EPISODE_WORD);
     if (epIdx !== -1) {
       if (/^\d+$/.test(tokens[epIdx + 1] || '')) info.episode = parseInt(tokens[epIdx + 1], 10);
       tokens = tokens.slice(0, epIdx);
@@ -271,6 +245,7 @@ function getAttr(tag, name) {
   return m ? (m[1] !== undefined ? m[1] : m[2]) : '';
 }
 
+// Every <a href="...watch.php?vid=ID" title="..."> on a page, de-duplicated by vid.
 function parseWatchAnchors(html) {
   var byVid = {};
   var out = [];
@@ -320,7 +295,6 @@ function buildMeta(data, type) {
   var translations = (data.translations && data.translations.translations) || [];
   translations.forEach(function (t) {
     if (t.iso_639_1 === 'ar' && t.data) raw.push(isTv ? t.data.name : t.data.title);
-    if (t.iso_639_1 === 'en' && t.data) raw.push(isTv ? t.data.name : t.data.title);
   });
 
   // Alternative titles are only trusted for movies (they are year-verified later).
@@ -330,20 +304,10 @@ function buildMeta(data, type) {
   }
 
   var arabic = data.original_language === 'ar';
-  var english = data.original_language === 'en';
-
-  // Language gate
-  var processable = true;
-  if (CONTENT_LANG === 'arabic' && !arabic) processable = false;
-  if (CONTENT_LANG === 'english' && !english) processable = false;
-
   var seenNorm = {};
   var titles = [];
   raw.forEach(function (t) {
     if (!t) return;
-    // For Arabic-original content, only keep Arabic-script titles.
-    // For English-original content, keep both English and Arabic titles
-    // (English titles are what the site actually uses).
     if (arabic && !hasArabicScript(t)) return;
     var norm = normalizeText(t);
     if (!norm || seenNorm[norm]) return;
@@ -357,8 +321,6 @@ function buildMeta(data, type) {
   return {
     type: type,
     arabic: arabic,
-    english: english,
-    processable: processable,
     year: isNaN(year) ? null : year,
     displayTitle: titles.length ? titles[0].raw : (isTv ? data.name : data.title),
     targets: titles.map(function (t) { return t.norm; }),
@@ -378,6 +340,7 @@ function searchPage(query, page) {
   });
 }
 
+// Walks pages of one query; onEntries(entries) returns true to stop everything.
 function searchPages(query, onEntries) {
   var page = 1;
   function step() {
@@ -394,6 +357,7 @@ function searchPages(query, onEntries) {
   return step();
 }
 
+// afterQuery() (optional) may stop the walk once a query has been fully read.
 function searchQueries(queries, onEntries, afterQuery) {
   var qi = 0;
   function nextQuery() {
@@ -408,12 +372,11 @@ function searchQueries(queries, onEntries, afterQuery) {
 
 // ─────────────────────────────── Movies ───────────────────────────────
 
+// Returns null when the upload is not this movie, otherwise a score.
 function scoreMovieEntry(entry, meta) {
   var info = parseTitle(entry.title);
   if (info.kind !== 'movie' && info.kind !== 'play') return null;
-
-  // Only block dubbed/subbed uploads for Arabic-original content.
-  if (meta.arabic && SKIP_DUB_SUB_ARABIC && (info.dubbed || info.subbed)) return null;
+  if (meta.arabic && (info.dubbed || info.subbed)) return null;
 
   var yearDiff = meta.year && info.year ? Math.abs(meta.year - info.year) : null;
   if (yearDiff !== null && yearDiff > 1) return null;
@@ -465,6 +428,7 @@ function findMovieCandidates(meta) {
   });
 }
 
+// Uploads without a year in the title: confirm the year on the page itself.
 function yearAcceptable(candidate, meta) {
   if (candidate.year || !meta.year) return Promise.resolve(true);
   return siteGet(BASE_URL + '/watch.php?vid=' + candidate.vid).then(function (html) {
@@ -503,6 +467,7 @@ function getMovieStreams(meta, title) {
 
 // ─────────────────────────────── Series ───────────────────────────────
 
+// Exact series-name match; "الانسه فرح 5" also matches target "الانسه فرح" (season 5).
 function matchSeriesName(name, targets) {
   for (var i = 0; i < targets.length; i++) {
     var t = targets[i];
@@ -525,8 +490,7 @@ function findSeriesEntries(meta, season) {
       var info = parseTitle(entry.title);
       if (info.kind !== 'series' && info.kind !== 'show') return;
       if (info.episode === null) return;
-      // Only block dubbed/subbed uploads for Arabic-original content.
-      if (meta.arabic && SKIP_DUB_SUB_ARABIC && (info.dubbed || info.subbed)) return;
+      if (meta.arabic && (info.dubbed || info.subbed)) return;
       var m = matchSeriesName(info.name, meta.targets);
       if (!m.matched) return;
       var entrySeason = info.season || m.trailingSeason || null;
@@ -540,6 +504,7 @@ function findSeriesEntries(meta, season) {
   return searchQueries(meta.queries, onEntries).then(function () { return matched; });
 }
 
+// Season / episode lists live on view-serie.php (or in the watch page block).
 function parseSeasons(html) {
   var headings = [];
   var hre = />\s*الموسم\s*([0-9\u0660-\u0669]+)\s*</g;
@@ -567,6 +532,7 @@ function parseSeasons(html) {
     bySeason[season].episodes.push({ episode: episode, vid: a.vid });
   });
 
+  // Tab-style layout (all headings first, panes after) cannot be mapped safely.
   var ambiguous = false;
   for (var i = 0; i < headings.length - 1; i++) {
     var between = anchors.filter(function (a) {
@@ -709,6 +675,7 @@ function cleanMediaUrl(url) {
     .trim();
 }
 
+// Dean Edwards p.a.c.k.e.r unpacker (used by 1vid, Vidspeed, HGCloud, Mixdrop...).
 function unpackAll(text) {
   var out = [];
   if (text.indexOf('p,a,c,k,e') === -1) return out;
@@ -887,8 +854,8 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
 
   return fetchTmdb(tmdbId, type).then(function (data) {
     var meta = buildMeta(data, type);
-    if (!meta.processable) {
-      log('skipped (content filter=' + CONTENT_LANG + '): ' + meta.displayTitle + ' [' + (meta.arabic ? 'ar' : 'en') + ']');
+    if (ARABIC_ONLY && !meta.arabic) {
+      log('skipped (not Arabic content): ' + meta.displayTitle);
       return [];
     }
     if (!meta.targets.length) {
@@ -898,7 +865,7 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     var title = type === 'tv'
       ? meta.displayTitle + ' S' + pad2(season) + 'E' + pad2(episode)
       : meta.displayTitle + (meta.year ? ' (' + meta.year + ')' : '');
-    log(type + ' "' + meta.displayTitle + '" lang=' + (meta.arabic ? 'ar' : 'en') + ' queries=' + JSON.stringify(meta.queries));
+    log(type + ' "' + meta.displayTitle + '" queries=' + JSON.stringify(meta.queries));
     return type === 'tv' ? getSeriesStreams(meta, season, episode, title) : getMovieStreams(meta, title);
   }).catch(function (err) {
     log('error: ' + (err && err.message));
