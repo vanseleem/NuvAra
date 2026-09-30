@@ -62,17 +62,14 @@ function getTmdbTitles(tmdbId, mediaType) {
         }).catch(function() {});
     });
   }, Promise.resolve()).then(function() {
-    console.log("[AhwakTV] TMDB titles:", titles.join(" | "));
     return titles;
   });
 }
 
-// Search via HTML parsing instead of REST API
 function searchAhwak(query) {
   var clean = String(query || "").trim();
   if (!clean) return Promise.resolve([]);
   var url = BASE + "/search.php?keywords=" + encodeURIComponent(clean);
-  console.log("[AhwakTV] search:", url);
   
   return fetchText(url, BASE + "/").then(function(html) {
     var results = [];
@@ -88,7 +85,6 @@ function searchAhwak(query) {
       if (!hrefM) continue;
       var href = hrefM[1];
       
-      // Look for the specific video ID AhwakTV uses
       var vidM = href.match(/vid=([a-zA-Z0-9_-]+)/i);
       if (!vidM) continue;
       var vid = vidM[1];
@@ -112,10 +108,8 @@ function searchAhwak(query) {
         results.push({ id: vid, url: href, title: title });
       }
     }
-    console.log("[AhwakTV] search results:", results.length);
     return results;
-  }).catch(function(err) {
-    console.log("[AhwakTV] search failed:", err.message);
+  }).catch(function() {
     return [];
   });
 }
@@ -130,7 +124,6 @@ function chooseResult(results, titles) {
     });
     if (s > bestScore) { bestScore = s; best = r; }
   });
-  if (best) console.log("[AhwakTV] Best match:", best.title, "score:", bestScore.toFixed(3));
   return bestScore >= 0.3 ? best : null;
 }
 
@@ -161,39 +154,67 @@ function hostLabel(url) {
   return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1) : "";
 }
 
+// MASSIVE UPDATE: Smart Link Extractor
 function extractLinksFromHtml(html, streams, seen) {
-  // Extract direct media files
-  var re = /((?:https?:\/\/)?[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*)/gi;
+  
+  // 1. Hunt for multi-server buttons (data-url, data-server, data-embed)
+  var dataRe = /data-(?:url|src|link|server|embed)=["']([^"']+)["']/gi;
   var m;
-  while ((m = re.exec(html)) !== null) {
-    var u = m[1].replace(/\\\//g, '/'); // Clean up PHP JSON escaped slashes
-    if (u.indexOf("/") === 0 && u.indexOf("//") !== 0) u = BASE + u;
-    else if (u.indexOf("//") === 0) u = "https:" + u;
+  while ((m = dataRe.exec(html)) !== null) {
+    var dUrl = decodeHtml(m[1]).replace(/\\\//g, '/');
+    if (dUrl.indexOf("data:image") > -1 || dUrl.indexOf("javascript:") > -1) continue; 
     
-    if (!seen[u] && u.indexOf("http") === 0) {
-      seen[u] = 1;
-      streams.push(makeStream(u, u.indexOf(".m3u8") > -1 ? "HLS Direct" : "MP4 Direct", "url"));
+    if (dUrl.indexOf("/") === 0 && dUrl.indexOf("//") !== 0) dUrl = BASE + dUrl;
+    else if (dUrl.indexOf("//") === 0) dUrl = "https:" + dUrl;
+
+    if (!seen[dUrl] && dUrl.indexOf("http") === 0 && dUrl.indexOf(BASE) === -1) {
+      seen[dUrl] = 1;
+      var isDirect = (dUrl.indexOf(".mp4") > -1 || dUrl.indexOf(".m3u8") > -1);
+      streams.push(makeStream(dUrl, hostLabel(dUrl) || "Server", isDirect ? "url" : "iframe"));
     }
   }
-  
-  // Extract external iframes (e.g. Vidmoly)
+
+  // 2. Extract standard iframes and filter out social media / tracking
   var iframeRe = /<iframe[^>]+src=["']([^"']+)["']/gi;
   while ((m = iframeRe.exec(html)) !== null) {
     var src = decodeHtml(m[1]).replace(/\\\//g, '/');
     if (src.indexOf("/") === 0 && src.indexOf("//") !== 0) src = BASE + src;
     else if (src.indexOf("//") === 0) src = "https:" + src;
     
-    // Ignore internal search tags
-    if (!seen[src] && src.indexOf("http") === 0 && src.indexOf("search.php") === -1) {
+    var skip = ["search.php", "facebook.com", "twitter.com", "youtube.com", "googletagmanager"];
+    var shouldSkip = false;
+    for (var i = 0; i < skip.length; i++) {
+        if (src.indexOf(skip[i]) > -1) shouldSkip = true;
+    }
+    
+    if (!seen[src] && src.indexOf("http") === 0 && !shouldSkip) {
       seen[src] = 1;
-      streams.push(makeStream(src, hostLabel(src), "iframe"));
+      // Skip pushing see.php as an iframe directly, because we scrape it internally below
+      if (src.indexOf("see.php") === -1) {
+          streams.push(makeStream(src, hostLabel(src) || "Server", "iframe"));
+      }
+    }
+  }
+
+  // 3. Strict JWPlayer / VideoJS extraction
+  var re = /(?:src=["']|(?:url|file)\s*:\s*["'])((?:https?:\/\/)?[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*)/gi;
+  while ((m = re.exec(html)) !== null) {
+    var u = m[1].replace(/\\\//g, '/'); 
+    if (u.indexOf("/") === 0 && u.indexOf("//") !== 0) u = BASE + u;
+    else if (u.indexOf("//") === 0) u = "https:" + u;
+    
+    // Ignore dummy videos
+    if (u.indexOf("trailer") > -1 || u.indexOf("blank") > -1 || u.indexOf("empty") > -1) continue;
+
+    if (!seen[u] && u.indexOf("http") === 0) {
+      seen[u] = 1;
+      streams.push(makeStream(u, u.indexOf(".m3u8") > -1 ? "HLS Direct" : "MP4 Direct", "url"));
     }
   }
 }
 
 function resolveFromWatch(vid) {
   var watchUrl = BASE + "/watch.php?vid=" + vid;
-  console.log("[AhwakTV] resolving:", watchUrl);
   return fetchText(watchUrl, BASE + "/").then(function(html) {
     var streams = [];
     var seen = {};
@@ -201,15 +222,14 @@ function resolveFromWatch(vid) {
     html = html.replace(/\\\//g, '/');
     extractLinksFromHtml(html, streams, seen);
     
-    // Failsafe: Dive into see.php concurrently if it exists
+    // Concurrently fetch see.php to grab anything hidden in the player frame
     var seeUrl = BASE + "/see.php?vid=" + vid;
     return fetchText(seeUrl, watchUrl).then(function(seeHtml) {
       seeHtml = seeHtml.replace(/\\\//g, '/');
       extractLinksFromHtml(seeHtml, streams, seen);
-      console.log("[AhwakTV] servers found:", streams.length);
       return streams;
     }).catch(function() {
-      return streams; // Return what we have if see.php fails
+      return streams; 
     });
   });
 }
@@ -225,15 +245,12 @@ function getMovieStreams(tmdbId) {
           if (!seen[r.id]) { seen[r.id] = 1; all.push(r); }
         });
       });
-      console.log("[AhwakTV] Unique Movie candidates:", all.length);
       if (!all.length) return [];
-      
       var best = chooseResult(all, titles);
       if (!best) return [];
       return resolveFromWatch(best.id);
     });
-  }).catch(function(err) {
-    console.log("[AhwakTV] Movie error:", err.message);
+  }).catch(function() {
     return [];
   });
 }
@@ -258,17 +275,12 @@ function getTvStreams(tmdbId, season, episode) {
         });
       });
       
-      console.log("[AhwakTV] TV candidates:", all.length);
-      
       var withEp = all.filter(function(r) {
-        // Drop result if it clearly belongs to the wrong season
         var hasSeasonNum = /الموسم\s*(\d+)/i.exec(r.title) || /موسم\s*(\d+)/i.exec(r.title);
         if (hasSeasonNum && parseInt(hasSeasonNum[1]) !== wantedSeason) {
           return false;
         }
-        // Strict Arabic digit match for the requested episode
-        var epMatch = new RegExp("(?:الحلق[ةه]\\s*" + wantedEp + "\\b|\\b" + wantedEp + "\\b)", "i").test(r.title);
-        return epMatch;
+        return new RegExp("(?:الحلق[ةه]\\s*" + wantedEp + "\\b|\\b" + wantedEp + "\\b)", "i").test(r.title);
       });
       
       var pool = withEp.length ? withEp : all;
@@ -278,14 +290,12 @@ function getTvStreams(tmdbId, season, episode) {
       if (!best) return [];
       return resolveFromWatch(best.id);
     });
-  }).catch(function(err) {
-    console.log("[AhwakTV] TV error:", err.message);
+  }).catch(function() {
     return [];
   });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
-  console.log("[AhwakTV] getStreams:", tmdbId, mediaType, season, episode);
   if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
   return getMovieStreams(tmdbId);
 }
