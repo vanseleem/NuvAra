@@ -86,15 +86,13 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// ── NEW: Search via AJAX JSON endpoint (was scraping HTML before) ──
+// ── Search via AJAX JSON endpoint ──
 function searchShahid(title) {
   var cleanTitle = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  // The search page loads results from this endpoint via AJAX.
   var url = SEARCH_BASE + "/search.php?keywords=" + encodeURIComponent(cleanTitle) + "&ajax=1";
   console.log("[ShahidMosalsalat] Search:", cleanTitle, url);
   return fetchJson(url, SEARCH_BASE + "/").then(function(data) {
     if (!data) return [];
-    // Response may be an array of items or an object with a results/data key.
     var list = Array.isArray(data) ? data : (data.results || data.data || data.items || []);
     var results = [];
     var seen = {};
@@ -128,26 +126,21 @@ function chooseResult(results, titles) {
   return bestScore >= 0.3 ? best : null;
 }
 
-// ── FIXED: Parse embed URL from watch page (multiple patterns + JSON) ──
 function extractEmbedUrl(watchHtml) {
-  // Direct patterns from the original script
   var m = watchHtml.match(/embed_url\s*[:=]\s*["']([^"']+)["']/i);
   if (m) return decodeHtml(m[1]);
   m = watchHtml.match(/contentUrl["'][^>]*content\s*=\s*["']([^"']+)["']/i);
   if (m) return decodeHtml(m[1]);
-  // Iframe with common streaming hosts
   m = watchHtml.match(/<iframe[^>]*src\s*=\s*["'](https?:\/\/(?:[^"']*(?:vk\.com|ok\.ru|vidmoly|uqload|1vid|mixdrop|vidspeed|hgcloud|vidhide|dood|streamtape|filemoon|voe|upstream|mp4upload|sendvid|sibnet)[^"']*))["']/i);
   if (m) return decodeHtml(m[1]);
-  // Any iframe pointing off-site
   m = watchHtml.match(/<iframe[^>]*src\s*=\s*["'](https?:\/\/(?!.*shahidmosalsalat)[^"']+)["']/i);
   if (m) return decodeHtml(m[1]);
-  // JSON blob inside script tags
   m = watchHtml.match(/["'](?:file|source|url|src)["']\s*:\s*["'](https?:\/\/[^"']+\.(?:m3u8|mp4)[^"']*)["']/i);
   if (m) return decodeHtml(m[1]);
   return null;
 }
 
-// === VK resolver — unchanged from original ===
+// === VK resolver ===
 function resolveVk(vkUrl) {
   console.log("[ShahidMosalsalat] VK:", vkUrl);
   return fetchText(vkUrl, "https://vk.com/").then(function(vkHtml) {
@@ -199,22 +192,23 @@ function qualityFromUrl(url) {
   return "Unknown";
 }
 
+// ── FIXED: Nuvio-compatible stream shape (matches Ahwak/Fosta/Akwam) ──
 function makeStream(url, label) {
   if (url.indexOf("http://") === 0) url = "https://" + url.slice(7);
   var isHls = /\.m3u8/i.test(url);
   return {
-    name: "⚜️ ShahidMosalsalat",
+    name: "⚜️ ShahidMosalsalat" + (label ? " " + label : ""),
     title: label ? "⚜️ ShahidMosalsalat \u2022 " + label : "⚜️ ShahidMosalsalat",
     url: url,
-    quality: qualityFromUrl(url),
-    type: isHls ? "hls" : "mp4",
-    referer: "https://vk.com/",
+    quality: isHls ? "Auto" : (qualityFromUrl(url) || "Unknown"),
+    size: "Unknown",
     headers: {
       "User-Agent": UA,
       "Referer": "https://vk.com/",
       "Origin": "https://vk.com",
       "Accept": "*/*"
-    }
+    },
+    provider: "shahidmosalsalat"
   };
 }
 
@@ -228,13 +222,15 @@ function resolveVid(vid) {
     return resolveVk(embedUrl).then(function(urls) {
       if (!urls.length) {
         console.log("[ShahidMosalsalat] No VK URLs — returning embed fallback");
+        // ── FIXED: same Nuvio-compatible shape as makeStream ──
         return [{
-          name: "⚜️ ShahidMosalsalat",
+          name: "⚜️ ShahidMosalsalat (Embed)",
           title: "⚜️ ShahidMosalsalat (Embed)",
           url: embedUrl,
           quality: "Auto",
-          type: "iframe",
-          referer: watchUrl
+          size: "Unknown",
+          headers: { "User-Agent": UA, "Referer": watchUrl },
+          provider: "shahidmosalsalat"
         }];
       }
       return urls.map(function(u, i) {
