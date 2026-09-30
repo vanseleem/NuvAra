@@ -1,7 +1,6 @@
-
 var BASE_URL = 'https://yam.ahwaktv.net';
 var PROVIDER_ID = 'ahwaktv';
-var PROVIDER_NAME = 'AhwakTV';
+var PROVIDER_NAME = '👑 AhwakTV';
 
 // Free key from https://www.themoviedb.org/settings/api
 var TMDB_API_KEY = '83d364331c40bfbe29858aeed82f45cc';
