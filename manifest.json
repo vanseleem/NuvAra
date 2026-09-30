@@ -17,6 +17,34 @@
       "supportsExternalPlayer": true
     },
     {
+      "id": "ramoflix",
+      "name": "RamoFlix",
+      "description": "Movies and TV series from RamoFlix",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/ramoflix.js",
+      "enabled": true,
+      "formats": ["iframe"],
+      "contentLanguage": ["en"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
+      "id": "doraby",
+      "name": "Doraby",
+      "description": "Movies and TV series from Doraby",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/doraby.js",
+      "enabled": true,
+      "formats": ["iframe"],
+      "contentLanguage": ["en"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
       "id": "netmirror",
       "name": "NetMirror",
       "description": "Netflix | Prime | Disney",
