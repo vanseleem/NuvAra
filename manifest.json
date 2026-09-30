@@ -141,6 +141,34 @@
   "supportsExternalPlayer": true
 },
     {
+  "id": "fostatv",
+  "name": "FostaTV",
+  "description": "Arabic movies and series",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/fostatv.js",
+  "enabled": true,
+  "formats": ["iframe", "mp4", "m3u8"],
+  "contentLanguage": ["ar"],
+  "limited": false,
+  "supportsExternalPlayer": true
+},
+{
+  "id": "ahwaktv",
+  "name": "AhwakTV",
+  "description": "Arabic movies and series",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/ahwaktv.js",
+  "enabled": true,
+  "formats": ["iframe", "mp4", "m3u8"],
+  "contentLanguage": ["ar"],
+  "limited": false,
+  "supportsExternalPlayer": true
+},
+    {
       "id": "akwam",
       "name": "Akwam",
       "description": "Arabic movie and TV streaming provider",
