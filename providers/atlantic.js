@@ -1,9 +1,17 @@
 "use strict";
 
+// ===== CONFIG =====
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
 var ATLANTIC_BASE = "https://atlantic.st";
-var TMDB_API = "https://api.themoviedb.org/3";
-var TMDB_KEY = "83d364331c40bfbe29858aeed82f45cc";
+var REQUEST_TIMEOUT_MS = 12000;
+var MAX_RETRIES = 1;
+var RETRY_DELAY_MS = 600;
+var CACHE_TTL_MS = 3 * 60 * 1000;
+var FAIL_CACHE_TTL_MS = 60 * 1000;
+var PREFERRED_SERVERS = ["Moscow", "Novo", "Omsk"];
+
+var cache = {};
+var inflight = {};
 
 function qualityFromUrl(url) {
   var s = String(url).toLowerCase();
@@ -16,145 +24,129 @@ function qualityFromUrl(url) {
   return null;
 }
 
-function searchTMDB(title, mediaType, year) {
+function delay(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+function withTimeout(promise, ms) {
   return new Promise(function(resolve, reject) {
-    var endpoint = mediaType === "tv" ? "search/tv" : "search/movie";
-    var tmdbUrl = TMDB_API + "/" + endpoint + "?query=" + encodeURIComponent(title) + "&api_key=" + TMDB_KEY;
-    if (year) {
-      tmdbUrl += "&year=" + year;
-    }
-    
-    console.log("[Atlantic] TMDB Search:", tmdbUrl);
-    
-    var fetchOptions = {
-      headers: {
-        "Accept": "application/json"
-      }
-    };
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      fetchOptions.signal = AbortSignal.timeout(8000);
-    }
-    
-    fetch(tmdbUrl, fetchOptions)
-      .then(function(response) {
-        if (!response.ok) throw new Error("TMDB HTTP " + response.status);
-        return response.json();
-      })
-      .then(function(data) {
-        if (!data.results || data.results.length === 0) {
-          reject(new Error("No TMDB results"));
-          return;
-        }
-        resolve(data.results[0]);
-      })
-      .catch(function(err) {
-        console.error("[Atlantic] TMDB search failed:", err.message);
-        reject(err);
-      });
+    var timer = setTimeout(function() { reject(new Error("Timeout after " + ms + "ms")); }, ms);
+    promise.then(
+      function(v) { clearTimeout(timer); resolve(v); },
+      function(e) { clearTimeout(timer); reject(e); }
+    );
   });
 }
 
-function fetchAtlanticStreams(tmdbId, mediaType, season, episode) {
-  return new Promise(function(resolve, reject) {
-    var streamUrl = ATLANTIC_BASE + "/api/get-streams";
-    var params = new URLSearchParams();
-    params.set("tmdbId", String(tmdbId));
-    params.set("type", mediaType);
-    if (mediaType === "tv") {
-      params.set("season", String(season || 1));
-      params.set("episode", String(episode || 1));
+function fetchAtlanticStreams(tmdbId, mediaType, season, episode, attempt) {
+  attempt = attempt || 0;
+  var query = "tmdbId=" + encodeURIComponent(String(tmdbId)) + "&type=" + encodeURIComponent(mediaType);
+  if (mediaType === "tv") {
+    query += "&season=" + encodeURIComponent(String(season || 1)) + "&episode=" + encodeURIComponent(String(episode || 1));
+  }
+  var fullUrl = ATLANTIC_BASE + "/api/get-streams?" + query;
+  console.log("[Atlantic] Fetching streams:", fullUrl, "attempt", attempt);
+
+  return withTimeout(fetch(fullUrl, {
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Accept": "application/json",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": ATLANTIC_BASE + "/",
+      "Origin": ATLANTIC_BASE
     }
-    
-    var fullUrl = streamUrl + "?" + params.toString();
-    console.log("[Atlantic] Fetching streams:", fullUrl);
-    
-    var fetchOptions = {
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Referer": ATLANTIC_BASE + "/"
+  }), REQUEST_TIMEOUT_MS)
+    .then(function(response) {
+      if (!response.ok) {
+        var httpErr = new Error("HTTP " + response.status);
+        httpErr.status = response.status;
+        throw httpErr;
       }
-    };
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-      fetchOptions.signal = AbortSignal.timeout(12000);
-    }
-    
-    fetch(fullUrl, fetchOptions)
-      .then(function(response) {
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        return response.json();
-      })
-      .then(function(data) {
-        resolve(data || {});
-      })
-      .catch(function(err) {
-        console.error("[Atlantic] Stream fetch failed:", err.message);
-        reject(err);
-      });
-  });
+      return response.text();
+    })
+    .then(function(text) {
+      try {
+        return JSON.parse(text) || {};
+      } catch (e) {
+        var parseErr = new Error("Non-JSON response: " + String(text).slice(0, 120));
+        parseErr.noRetry = true;
+        throw parseErr;
+      }
+    })
+    .catch(function(err) {
+      var retryable = !err.noRetry && (!err.status || err.status >= 500);
+      if (retryable && attempt < MAX_RETRIES) {
+        return delay(RETRY_DELAY_MS).then(function() {
+          return fetchAtlanticStreams(tmdbId, mediaType, season, episode, attempt + 1);
+        });
+      }
+      throw err;
+    });
 }
 
 function makeStream(url, server, label) {
   var quality = qualityFromUrl(url) || (label && label !== "Auto" ? label : null) || "Auto";
   return {
-    name: "✨ Atlantic",
-    title: "✨ Atlantic • " + server + " • " + quality,
+    name: "🌊 Atlantic",
+    title: "🌊 Atlantic • " + server + " • " + quality,
     url: url,
     quality: quality,
     headers: {
       "User-Agent": USER_AGENT,
-      "Referer": ATLANTIC_BASE + "/"
+      "Referer": ATLANTIC_BASE + "/",
+      "Origin": ATLANTIC_BASE
     }
   };
 }
 
-function getStreams(tmdbId, mediaType, season, episode) {
-  return new Promise(function(resolve, reject) {
-    console.log("[Atlantic] Request:", tmdbId, mediaType, season, episode);
-    if (!tmdbId || (mediaType !== "movie" && mediaType !== "tv")) {
-      resolve([]);
-      return;
-    }
-    if (mediaType === "tv" && (!season || !episode)) {
-      resolve([]);
-      return;
-    }
-    
-    fetchAtlanticStreams(tmdbId, mediaType, season, episode)
-      .then(function(sources) {
-        var keys = Object.keys(sources);
-        if (keys.length === 0) {
-          console.log("[Atlantic] No sources found.");
-          return [];
-        }
-        
-        var serverOrder = ["Moscow", "Novo", "Omsk"];
-        var seen = {};
-        var streams = [];
-        
-        serverOrder.forEach(function(serverName) {
-          var source = sources[serverName];
-          if (!source || !source.url) return;
-          
-          var m3u8Url = source.url;
-          if (seen[m3u8Url]) return;
-          seen[m3u8Url] = true;
-          
-          var stream = makeStream(m3u8Url, serverName, source.label || null);
-          streams.push(stream);
-        });
-        
-        console.log("[Atlantic] Total streams:", streams.length);
-        return streams;
-      })
-      .then(function(streams) {
-        resolve(streams);
-      })
-      .catch(function(error) {
-        console.error("[Atlantic] getStreams error:", error.message);
-        resolve([]);
-      });
+function buildStreams(sources) {
+  var keys = Object.keys(sources || {});
+  var names = PREFERRED_SERVERS.filter(function(n) { return keys.indexOf(n) !== -1; })
+    .concat(keys.filter(function(k) { return PREFERRED_SERVERS.indexOf(k) === -1; }));
+
+  var seen = {};
+  var streams = [];
+  names.forEach(function(serverName) {
+    var source = sources[serverName];
+    if (!source || typeof source.url !== "string" || !source.url) return;
+    if (seen[source.url]) return;
+    seen[source.url] = true;
+    streams.push(makeStream(source.url, serverName, source.label || null));
   });
+  return streams;
+}
+
+function getStreams(tmdbId, mediaType, season, episode) {
+  console.log("[Atlantic] Request:", tmdbId, mediaType, season, episode);
+  if (!tmdbId || (mediaType !== "movie" && mediaType !== "tv")) return Promise.resolve([]);
+  if (mediaType === "tv" && (!season || !episode)) return Promise.resolve([]);
+
+  var key = mediaType + ":" + tmdbId + ":" + (season || 0) + ":" + (episode || 0);
+  var hit = cache[key];
+  if (hit && hit.expires > Date.now()) {
+    console.log("[Atlantic] Cache hit:", key);
+    return Promise.resolve(hit.streams);
+  }
+  if (inflight[key]) return inflight[key];
+
+  inflight[key] = fetchAtlanticStreams(tmdbId, mediaType, season, episode)
+    .then(function(sources) {
+      var streams = buildStreams(sources);
+      console.log("[Atlantic] Total streams:", streams.length);
+      cache[key] = { streams: streams, expires: Date.now() + (streams.length ? CACHE_TTL_MS : FAIL_CACHE_TTL_MS) };
+      return streams;
+    })
+    .catch(function(error) {
+      console.error("[Atlantic] getStreams error:", error.message);
+      cache[key] = { streams: [], expires: Date.now() + FAIL_CACHE_TTL_MS };
+      return [];
+    })
+    .then(function(streams) {
+      delete inflight[key];
+      return streams;
+    });
+
+  return inflight[key];
 }
 
 if (typeof module !== "undefined" && module.exports) {
