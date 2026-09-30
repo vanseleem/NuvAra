@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════
-// RamoFlix — Ahwak-style provider (fmovie theme)
+// RamoFlix — fmovie theme provider (Ahwak-style extractors)
 // ═══════════════════════════════════════════════════════════════════════
 var BASE_URL = 'https://ramoflix.net';
 var PROVIDER_ID = 'ramoflix';
@@ -125,7 +125,6 @@ function buildMeta(data, type) {
 
 function parseSearchResults(html) {
   var results = [], seen = {};
-  // Broad: any <a href=".../movie/..." or "/tv/..." or "/series/..." with visible text
   var re = /<a\s+href=["']([^"']+\/(?:movie|tv|series|film)\/[^"'\/]+\/?)["'][^>]*>([^<]{2,120})<\/a>/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
@@ -160,7 +159,7 @@ function findBestMatch(results, meta) {
   return bestScore >= 0.5 ? best : null;
 }
 
-// ───────────────────── fmovie page parsing ───────────────────────────
+// ─────────────── fmovie Servers / Episodes extraction ────────────────
 
 function extractServers(html) {
   var m = html.match(/var\s+Servers\s*=\s*(\{[\s\S]*?\});/);
@@ -171,18 +170,9 @@ function extractServers(html) {
 
 function extractServerLabels(html) {
   var labels = {};
-  // Try several patterns used by fmovie themes
-  var re = /onclick=["']loadServer\(['"]?(\w+)['"]?\)["'][^>]*>([\s\S]{0,300}?)<\/li>/gi;
+  var re = /onclick=["']loadServer\(['"]?(\w+)['"]?\)["'][^>]*>[\s\S]{0,300}?<span>([^<]+)<\/span>/gi;
   var m;
-  while ((m = re.exec(html)) !== null) {
-    var key = m[1];
-    var txt = decodeEntities(m[2].replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
-    if (txt && !labels[key]) labels[key] = txt;
-  }
-  if (!Object.keys(labels).length) {
-    var re2 = /data-server=["'](\w+)["'][^>]*>([^<]+)</gi;
-    while ((m = re2.exec(html)) !== null) labels[m[1]] = decodeEntities(m[2]).trim();
-  }
+  while ((m = re.exec(html)) !== null) labels[m[1]] = decodeEntities(m[2]).trim();
   return labels;
 }
 
@@ -195,23 +185,15 @@ function extractEpisodes(html) {
 
 function extractTvServerLabels(html) {
   var labels = [], seen = {};
-  var re = /data-load-embed-host=["']([^"']+)["'][^>]*>([\s\S]{0,300}?)<\/li>/gi;
+  var re = /onclick=["']loadServer\(['"]?(\w+)['"]?\)["'][^>]*>[\s\S]{0,300}?<span>([^<]+)<\/span>/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
-    var host = decodeEntities(m[1]).trim();
-    var txt = decodeEntities(m[2].replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
-    if (!seen[host]) { seen[host] = 1; labels.push({ host: host, label: txt || host }); }
-  }
-  if (!labels.length) {
-    var re2 = /data-load-embed-host=["']([^"']+)["']/gi;
-    while ((m = re2.exec(html)) !== null) {
-      if (!seen[m[1]]) { seen[m[1]] = 1; labels.push({ host: m[1], label: m[1] }); }
-    }
+    if (!seen[m[1]]) { seen[m[1]] = 1; labels.push({ host: m[1], label: decodeEntities(m[2]).trim() }); }
   }
   return labels;
 }
 
-// ────────────────────── Extractors (Ahwak style) ─────────────────────
+// ─────────────── Generic media extractors (Ahwak style) ──────────────
 
 var QUALITY_RANK_AUTO = 1080;
 
@@ -361,7 +343,6 @@ function resolveEmbed(embedUrl, label) {
     if (!items.length) throw new Error('no direct URL');
     return items.map(function (it) { it.server = label; return it; });
   }).catch(function () {
-    // iframe fallback with correct origin referer
     var origin = originOf(embedUrl);
     return [{
       url: embedUrl,
@@ -424,6 +405,9 @@ function getMovieStreams(meta, title) {
       var labels = extractServerLabels(html);
       var embedList = [];
       Object.keys(servers).forEach(function (k) {
+        if (k === 'post_id' || k === 'id' || k === 'imdb_id' || k === 'image' ||
+            k === 'vote_average' || k === 'site' || k === 'domain' || k === 'youtube_id' ||
+            k === 'premium' || k === 'autoembed') return;
         var url = servers[k];
         if (!url || !/^https?:\/\//i.test(url)) return;
         var label = labels[k] || (hostOf(url).split('.').slice(-2, -1)[0] || k);
