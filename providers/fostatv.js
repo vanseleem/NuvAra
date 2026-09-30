@@ -1,6 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────
-// FostaTV — AhwakTV architecture (ported)
-// ─────────────────────────────────────────────────────────────────────
+
 var BASE_URL = 'https://fosta-tv.monster';
 var PROVIDER_ID = 'fostatv';
 var PROVIDER_NAME = 'FostaTV';
