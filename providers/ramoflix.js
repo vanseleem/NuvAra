@@ -1,16 +1,24 @@
-var BASE = "https://ramoflix.net";
-var PROVIDER_ID = "ramoflix";
-var PROVIDER_NAME = "🎬 RamoFlix";
+// ═══════════════════════════════════════════════════════════════════════
+// RamoFlix / Doraby — fmovie-theme provider with multi-server extraction
+// ═══════════════════════════════════════════════════════════════════════
+var BASE = "https://ramoflix.net";            // Doraby: "https://doraby.com"
+var PROVIDER_ID = "ramoflix";                 // Doraby: "doraby"
+var PROVIDER_NAME = "🎬 RamoFlix";            // Doraby: "🎬 Doraby"
 
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 var SITE_TIMEOUT = 15000;
-var EMBED_TIMEOUT = 10000;
-var M3U8_TIMEOUT = 6000;
-var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+var EMBED_TIMEOUT = 12000;
 
-function log(m) { console.log("[RamoFlix] " + m); }
+var UA_SITE = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
+var UA_EMBED = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-function decodeHtml(str) {
+// ─────────────────────────────── Logging ──────────────────────────────
+
+function log(m) { console.log("[" + PROVIDER_NAME.replace(/[^A-Za-z]/g, "") + "] " + m); }
+
+// ───────────────────────────── Text helpers ───────────────────────────
+
+function decodeEntities(str) {
   return String(str == null ? "" : str)
     .replace(/&#x([0-9a-f]+);/gi, function (_, h) { return String.fromCharCode(parseInt(h, 16)); })
     .replace(/&#(\d+);/g, function (_, d) { return String.fromCharCode(parseInt(d, 10)); })
@@ -20,16 +28,18 @@ function decodeHtml(str) {
 }
 
 function normalizeText(input) {
-  return decodeHtml(input).toLowerCase()
+  return decodeEntities(input).toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^\u0621-\u064Aa-z0-9]+/g, " ")
     .replace(/\s+/g, " ").trim();
 }
 
 function bigramMap(str) {
-  var s = str.replace(/ /g, ""); var map = {}; var size = 0;
+  var s = str.replace(/ /g, ""), map = {}, size = 0;
   for (var i = 0; i < s.length - 1; i++) {
-    var g = s.substr(i, 2); map[g] = (map[g] || 0) + 1; size++;
+    var g = s.substr(i, 2);
+    map[g] = (map[g] || 0) + 1;
+    size++;
   }
   return { map: map, size: size };
 }
@@ -43,7 +53,13 @@ function diceScore(a, b) {
   return (2 * common) / (x.size + y.size);
 }
 
-function asciiSafe(v) { return String(v).replace(/[^\x00-\x7F]/g, function (c) { return encodeURIComponent(c); }); }
+function pad2(n) { return n < 10 ? "0" + n : String(n); }
+
+// ──────────────────────────────── HTTP ────────────────────────────────
+
+function asciiSafe(v) {
+  return String(v).replace(/[^\x00-\x7F]/g, function (c) { return encodeURIComponent(c); });
+}
 
 function withTimeout(promise, ms, label) {
   if (typeof setTimeout !== "function") return promise;
@@ -62,76 +78,86 @@ function fetchText(url, headers, timeoutMs) {
 
 function siteGet(url) {
   return fetchText(url, {
-    "User-Agent": UA,
+    "User-Agent": UA_SITE,
     "Referer": BASE + "/",
     "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en;q=0.9"
   });
 }
 
-function fetchTmdb(tmdbId, type) {
-  var url = "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) +
-    "?api_key=" + TMDB_API_KEY + "&language=en";
-  return fetchText(url, { "Accept": "application/json" }).then(JSON.parse);
+function hostOf(url) {
+  var m = /^https?:\/\/([^\/?#:]+)/i.exec(url);
+  return m ? m[1].toLowerCase().replace(/^www\./, "") : "";
 }
-
-// ───────────────────────────── URL helpers ─────────────────────────────
-
-function flatten(groups) { return [].concat.apply([], groups); }
 
 function originOf(url) {
   var m = /^(https?:\/\/[^\/?#]+)/i.exec(url);
   return m ? m[1] : "";
 }
 
-function absoluteUrl(url, baseUrl) {
-  var u = decodeHtml(url).trim();
-  if (/^https?:\/\//i.test(u)) return u;
-  if (u.indexOf("//") === 0) return "https:" + u;
-  if (u.charAt(0) === "/") return originOf(baseUrl) + u;
-  return "";
+// ──────────────────────────── TMDB ────────────────────────────────────
+
+function fetchTmdb(tmdbId, type) {
+  var url = "https://api.themoviedb.org/3/" + type + "/" + encodeURIComponent(tmdbId) +
+    "?api_key=" + TMDB_API_KEY + "&language=en&append_to_response=translations,alternative_titles";
+  return fetchText(url, { "Accept": "application/json" }).then(function (b) { return JSON.parse(b); });
 }
 
-function resolveRelative(rel, baseUrl) {
-  if (/^https?:\/\//i.test(rel)) return rel;
-  if (rel.indexOf("//") === 0) return "https:" + rel;
-  if (rel.charAt(0) === "/") return originOf(baseUrl) + rel;
-  var clean = baseUrl.split("?")[0].split("#")[0];
-  return clean.substring(0, clean.lastIndexOf("/") + 1) + rel;
+function buildMeta(data, type) {
+  var isTv = type === "tv";
+  var raw = [isTv ? data.name : data.title, isTv ? data.original_name : data.original_title];
+  var trs = (data.translations && data.translations.translations) || [];
+  trs.forEach(function (t) {
+    if (t.iso_639_1 === "en" && t.data) raw.push(isTv ? t.data.name : t.data.title);
+  });
+  if (!isTv) {
+    var alts = (data.alternative_titles && data.alternative_titles.titles) || [];
+    alts.forEach(function (a) { if (a.title) raw.push(a.title); });
+  }
+  var dateStr = isTv ? data.first_air_date : data.release_date;
+  var year = dateStr ? parseInt(String(dateStr).slice(0, 4), 10) : null;
+  var seenNorm = {}, titles = [];
+  raw.forEach(function (t) {
+    if (!t) return;
+    var n = normalizeText(t);
+    if (!n || seenNorm[n]) return;
+    seenNorm[n] = true;
+    titles.push(t);
+  });
+  return {
+    titles: titles,
+    targets: titles.map(normalizeText),
+    year: isNaN(year) ? null : year
+  };
 }
 
-function cleanMediaUrl(url) {
-  return String(url)
-    .replace(/\\u0026/gi, "&")
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&")
-    .trim();
-}
-
-function qualityFromUrl(url) {
-  var m = /(\d{3,4})p\b/i.exec(url);
-  return m ? m[1] + "p" : null;
-}
-
-// ───────────────────────────── Site search ─────────────────────────────
+// ──────────────────────────── Search ─────────────────────────────────
 
 function parseSearchResults(html) {
-  var results = [];
-  var re = /<div class="poster">\s*<a href="([^"]+)">[\s\S]*?<div class="meta">[\s\S]*?<a href="[^"]+">([^<]*)<\/a>/g;
+  var results = [], seen = {};
+  var re = /<div class="poster">[\s\S]*?<a\s+href="([^"]+)"[^>]*>[\s\S]*?<h2[^>]*>([^<]+)<\/h2>/gi;
   var m;
   while ((m = re.exec(html)) !== null) {
-    var url = decodeHtml(m[1]);
-    var title = decodeHtml(m[2]).trim();
-    if (url && title) results.push({ url: url, title: title });
+    var url = decodeEntities(m[1]);
+    var title = decodeEntities(m[2]).trim();
+    if (!url || !title || seen[url]) continue;
+    seen[url] = 1;
+    results.push({ url: url, title: title });
+  }
+  // Fallback: broader regex in case theme markup differs
+  if (!results.length) {
+    var re2 = /href="(https?:\/\/[^"]*\/(movie|tv)\/[^"\/]+\/)"[^>]*title="([^"]+)"/gi;
+    while ((m = re2.exec(html)) !== null) {
+      var u = decodeEntities(m[1]), t = decodeEntities(m[3]).trim();
+      if (!seen[u]) { seen[u] = 1; results.push({ url: u, title: t }); }
+    }
   }
   return results;
 }
 
 function searchSite(query) {
   var url = BASE + "/?s=" + encodeURIComponent(query);
-  return siteGet(url).then(function (html) {
-    return parseSearchResults(html);
-  }).catch(function (e) {
+  return siteGet(url).then(parseSearchResults).catch(function (e) {
     log("search failed (" + query + "): " + e.message);
     return [];
   });
@@ -151,46 +177,103 @@ function findBestMatch(results, meta) {
   return bestScore >= 0.5 ? best : null;
 }
 
+// ──────────────────────── Server extraction ──────────────────────────
+
 function extractServers(html) {
-  var m = html.match(/var Servers = (\{[\s\S]*?\});/);
+  var m = html.match(/var\s+Servers\s*=\s*(\{[\s\S]*?\});/);
   if (!m) return null;
-  try {
-    return JSON.parse(m[1].replace(/\\\//g, "/"));
-  } catch (e) {
-    log("Servers parse error: " + e.message);
-    return null;
-  }
+  try { return JSON.parse(m[1].replace(/\\\//g, "/")); }
+  catch (e) { log("Servers parse error: " + e.message); return null; }
 }
 
 function extractServerLabels(html) {
   var labels = {};
-  var re = /<li class="server[^"]*"\s+onclick="loadServer\((\w+)\)"[^>]*><span>([^<]+)<\/span>/g;
+  // Pattern A: onclick="loadServer(key)" with a label span
+  var re = /<li[^>]*class="[^"]*server[^"]*"[^>]*onclick="loadServer\(['"]?(\w+)['"]?\)"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/gi;
   var m;
-  while ((m = re.exec(html)) !== null) labels[m[1]] = decodeHtml(m[2]).trim();
+  while ((m = re.exec(html)) !== null) labels[m[1]] = decodeEntities(m[2]).trim();
+  // Pattern B: data-server="key" with label text
+  if (!Object.keys(labels).length) {
+    var re2 = /data-server=["'](\w+)["'][^>]*>([^<]+)</gi;
+    while ((m = re2.exec(html)) !== null) labels[m[1]] = decodeEntities(m[2]).trim();
+  }
   return labels;
 }
 
 function extractEpisodes(html) {
-  var m = html.match(/var Episodes = (\{[\s\S]*?\});/);
+  var m = html.match(/var\s+Episodes\s*=\s*(\{[\s\S]*?\});/);
   if (!m) return null;
-  try {
-    return JSON.parse(m[1].replace(/\\\//g, "/"));
-  } catch (e) {
-    return null;
-  }
+  try { return JSON.parse(m[1].replace(/\\\//g, "/")); }
+  catch (e) { return null; }
 }
 
 function extractTvServerLabels(html) {
-  var labels = [];
-  var re = /<li class="server[^"]*"[^>]*data-load-embed-host="([^"]+)"[^>]*><span>([^<]+)<\/span>/g;
+  var labels = [], seen = {};
+  var re = /data-load-embed-host=["']([^"']+)["'][^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/gi;
   var m;
-  while ((m = re.exec(html)) !== null) labels.push({ host: m[1], label: decodeHtml(m[2]).trim() });
+  while ((m = re.exec(html)) !== null) {
+    var host = decodeEntities(m[1]).trim(), label = decodeEntities(m[2]).trim();
+    if (!seen[host]) { seen[host] = 1; labels.push({ host: host, label: label }); }
+  }
+  // Fallback: any list item with data-load-embed-host
+  if (!labels.length) {
+    var re2 = /data-load-embed-host=["']([^"']+)["']/gi;
+    while ((m = re2.exec(html)) !== null) {
+      if (!seen[m[1]]) { seen[m[1]] = 1; labels.push({ host: m[1], label: m[1] }); }
+    }
+  }
   return labels;
 }
 
-// ─────────────────────── Embed -> real stream resolver ─────────────────────
+// ──────────────── Embed resolution (direct-URL extraction) ────────────
 
-// Dean Edwards p.a.c.k.e.r unpacker (some embed hosts hide their m3u8 in it).
+function qualityFromUrl(url) {
+  var s = String(url).toLowerCase();
+  if (/2160|4k/.test(s)) return "2160p";
+  if (/1440/.test(s)) return "1440p";
+  if (/1080/.test(s)) return "1080p";
+  if (/720/.test(s)) return "720p";
+  if (/480/.test(s)) return "480p";
+  if (/360/.test(s)) return "360p";
+  if (/240/.test(s)) return "240p";
+  var m = /(\d{3,4})p\b/i.exec(s);
+  return m ? m[1] + "p" : null;
+}
+
+function serverLabelFromHost(host) {
+  if (/vidfast/.test(host)) return "VidFast";
+  if (/vidcore/.test(host)) return "VidCore";
+  if (/vidzee/.test(host)) return "VidZee";
+  if (/vidy\.st|videasy/.test(host)) return "Videasy";
+  if (/vidlove|111movies/.test(host)) return "111Movies";
+  if (/gardenbeast|vidsrc/.test(host)) return "Vidsrc";
+  if (/cinesrc/.test(host)) return "Cinesrc";
+  return host.split(".").slice(-2, -1)[0] || host;
+}
+
+function scanMediaUrls(text, baseUrl) {
+  var patterns = [
+    /sources\s*:\s*\[\s*\{\s*["']?file["']?\s*:\s*["']([^"']+)["']/gi,
+    /["']?file["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi,
+    /["']hls\d*["']\s*:\s*["']([^"']+)["']/gi,
+    /["'](https?:\\?\/\\?\/[^"'\s]+?\.(?:m3u8|mp4)[^"'\s]*)["']/gi,
+    /source\s*=\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi
+  ];
+  var found = [], seen = {};
+  patterns.forEach(function (re) {
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      var u = String(m[1]).replace(/\\\//g, "/").replace(/&amp;/g, "&").trim();
+      if (!/^https?:/i.test(u)) continue;
+      if (seen[u]) continue;
+      if (/\.(?:jpe?g|png|gif|webp|vtt|srt|css|js|json)(?:[?#]|$)/i.test(u)) continue;
+      seen[u] = 1;
+      found.push(u);
+    }
+  });
+  return found;
+}
+
 function unpackAll(text) {
   var out = [];
   if (text.indexOf("p,a,c,k,e") === -1) return out;
@@ -202,8 +285,7 @@ function unpackAll(text) {
   patterns.forEach(function (re) {
     var m;
     while ((m = re.exec(text)) !== null) {
-      var radix = parseInt(m[2], 10);
-      var words = m[4].split("|");
+      var radix = parseInt(m[2], 10), words = m[4].split("|");
       var payload = m[1].replace(/\\\\/g, "\\").replace(/\\'/g, "'").replace(/\\"/g, '"');
       out.push(payload.replace(/\b\w+\b/g, function (w) {
         var n = 0;
@@ -219,209 +301,173 @@ function unpackAll(text) {
   return out;
 }
 
-var BAD_ASSET = /\.(?:jpe?g|png|gif|webp|vtt|srt|css|js|json|html?)(?:[?#]|$)/i;
-
-function scanMediaUrls(text, baseUrl) {
-  var patterns = [
-    /sources\s*:\s*\[\s*\{\s*["']?file["']?\s*:\s*["']([^"']+)["']/gi,
-    /sources\s*:\s*\[\s*["']([^"']+)["']/gi,
-    /["']?file["']?\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi,
-    /["']hls\d*["']\s*:\s*["']([^"']+)["']/gi,
-    /["'](https?:\\?\/\\?\/[^"'\s]+?\.(?:m3u8|mp4)[^"'\s]*)["']/gi
-  ];
-  var found = [];
-  var seen = {};
-  patterns.forEach(function (re) {
-    var m;
-    while ((m = re.exec(text)) !== null) {
-      var url = absoluteUrl(cleanMediaUrl(m[1]), baseUrl);
-      if (!url || seen[url] || BAD_ASSET.test(url)) continue;
-      seen[url] = true;
-      found.push(url);
-    }
-  });
-  return found;
-}
-
-function findIframes(html, baseUrl) {
-  var out = [];
-  var re = /<iframe\b[^>]*?\s(?:data-)?src\s*=\s*["']([^"']+)["']/gi;
-  var m;
-  while ((m = re.exec(html)) !== null) {
-    var u = absoluteUrl(m[1], baseUrl);
-    if (u && out.indexOf(u) === -1) out.push(u);
-  }
-  return out;
-}
-
-function embedGet(url, referer) {
-  return fetchText(url, {
-    "User-Agent": UA,
-    "Referer": referer || BASE + "/",
-    "Accept": "text/html,application/xhtml+xml,*/*",
+function resolveEmbedToDirectStreams(embedUrl, label) {
+  var host = hostOf(embedUrl);
+  var origin = originOf(embedUrl);
+  var headers = {
+    "User-Agent": UA_EMBED,
+    "Referer": origin + "/",
+    "Origin": origin,
+    "Accept": "text/html,application/xhtml+xml,application/json",
     "Accept-Language": "en;q=0.9"
-  }, EMBED_TIMEOUT);
-}
-
-// Reads an HLS master playlist and returns one entry per resolution.
-function expandHls(url, headers) {
-  return fetchText(url, headers, M3U8_TIMEOUT).then(function (text) {
-    if (text.indexOf("#EXT-X-STREAM-INF") === -1) return [{ url: url, quality: "Auto" }];
-    var variants = [];
-    var seenQ = {};
-    var lines = text.split(/\r?\n/);
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim();
-      if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
-      var res = /RESOLUTION=(\d+)x(\d+)/i.exec(line);
-      var height = res ? parseInt(res[2], 10) : 0;
-      var next = "";
-      for (var j = i + 1; j < lines.length; j++) {
-        var t = lines[j].trim();
-        if (t && t.charAt(0) !== "#") { next = t; i = j; break; }
-      }
-      if (!next || !height) continue;
-      var quality = height + "p";
-      if (seenQ[quality]) continue;
-      seenQ[quality] = true;
-      variants.push({ url: resolveRelative(next, url), quality: quality, height: height });
-    }
-    variants.sort(function (a, b) { return b.height - a.height; });
-    return variants.length ? variants : [{ url: url, quality: "Auto" }];
-  }).catch(function () {
-    return [{ url: url, quality: "Auto" }];
-  });
-}
-
-// item = { url, label }. depth 1 allows following one iframe (used for TV pages).
-function resolveEmbed(item, depth, referer) {
-  return embedGet(item.url, referer).then(function (html) {
+  };
+  log("resolving embed: " + label + " → " + embedUrl);
+  return fetchText(embedUrl, headers, EMBED_TIMEOUT).then(function (html) {
     var texts = [html].concat(unpackAll(html));
     var urls = [];
     texts.forEach(function (t) {
-      scanMediaUrls(t, item.url).forEach(function (u) { if (urls.indexOf(u) === -1) urls.push(u); });
+      scanMediaUrls(t, embedUrl).forEach(function (u) {
+        if (urls.indexOf(u) === -1) urls.push(u);
+      });
     });
-
     if (!urls.length) {
-      var frames = depth < 1 ? findIframes(html, item.url) : [];
-      log(item.label + ": no media in page, iframes=" + frames.length);
-      return Promise.all(frames.slice(0, 2).map(function (f) {
-        return resolveEmbed({ url: f, label: item.label }, depth + 1, item.url);
-      })).then(flatten);
+      log("  no direct URL found for " + label + " — will return iframe fallback");
+      return [];
     }
-
-    var origin = originOf(item.url);
-    var headers = { "User-Agent": UA, "Referer": origin + "/", "Origin": origin };
-    log(item.label + ": " + urls.length + " media url(s)");
-
-    return Promise.all(urls.slice(0, 3).map(function (u) {
-      if (/\.m3u8/i.test(u)) {
-        return expandHls(u, headers).then(function (variants) {
-          var list = [{ url: u, quality: "Auto" }].concat(variants.filter(function (v) { return v.url !== u; }));
-          return list.map(function (v) {
-            return { url: v.url, quality: v.quality, label: item.label, headers: headers };
-          });
-        });
-      }
-      return Promise.resolve([{ url: u, quality: qualityFromUrl(u) || "Auto", label: item.label, headers: headers }]);
-    })).then(flatten);
-  }).catch(function (err) {
-    log(item.label + " failed: " + (err && err.message));
+    var streams = [];
+    urls.forEach(function (u) {
+      var q = /\.m3u8/i.test(u) ? "Auto" : (qualityFromUrl(u) || "Unknown");
+      streams.push({
+        name: PROVIDER_NAME + " " + label + " " + (q !== "Unknown" ? q : "Auto"),
+        title: label,
+        url: u,
+        quality: q,
+        size: "Unknown",
+        headers: headers,
+        provider: PROVIDER_ID
+      });
+    });
+    log("  found " + streams.length + " direct streams for " + label);
+    return streams;
+  }).catch(function (e) {
+    log("  resolve failed for " + label + ": " + e.message);
     return [];
   });
 }
 
-function buildStreams(embedItems, title) {
-  return Promise.all(embedItems.map(function (item) {
-    return resolveEmbed(item, 0, BASE + "/");
+function makeIframeFallback(embedUrl, label, title) {
+  var origin = originOf(embedUrl);
+  return {
+    name: PROVIDER_NAME + " " + label + " (iframe)",
+    title: title + " – " + label,
+    url: embedUrl,
+    quality: "Auto",
+    size: "Unknown",
+    type: "iframe",
+    headers: {
+      "User-Agent": UA_EMBED,
+      "Referer": origin + "/",
+      "Origin": origin
+    },
+    provider: PROVIDER_ID
+  };
+}
+
+function buildStreamsFromEmbeds(embedList, displayTitle) {
+  // For each embed, try direct extraction; if it fails, keep an iframe fallback.
+  return Promise.all(embedList.map(function (item) {
+    return resolveEmbedToDirectStreams(item.url, item.label).then(function (streams) {
+      if (streams.length) return streams;
+      return [makeIframeFallback(item.url, item.label, displayTitle)];
+    });
   })).then(function (groups) {
-    var streams = [];
-    var seen = {};
-    groups.forEach(function (items) {
-      items.forEach(function (it) {
-        if (seen[it.url]) return;
-        seen[it.url] = true;
-        streams.push({
-          name: PROVIDER_NAME + " " + it.label + " " + it.quality,
-          title: title + " - " + it.label,
-          url: it.url,
-          quality: it.quality,
-          headers: it.headers,
-          provider: PROVIDER_ID
-        });
+    var out = [], seen = {};
+    groups.forEach(function (g) {
+      g.forEach(function (s) {
+        if (seen[s.url]) return;
+        seen[s.url] = 1;
+        out.push(s);
       });
     });
-    log("playable streams: " + streams.length + " from " + embedItems.length + " servers");
-    return streams;
+    return out;
   });
 }
 
-// ───────────────────────────── Movies / TV ─────────────────────────────
+// ──────────────────────────── Movies ─────────────────────────────────
 
-function getMovieStreams(meta, title) {
+function getMovieStreams(meta, displayTitle) {
   var queries = meta.titles.slice(0, 3);
-  var allResults = [], seen = {};
-  var qi = 0;
+  var all = [], seen = {}, qi = 0;
   function nextQuery() {
     if (qi >= queries.length) return Promise.resolve();
-    return searchSite(queries[qi++]).then(function (results) {
-      results.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; allResults.push(r); } });
+    return searchSite(queries[qi++]).then(function (rs) {
+      rs.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; all.push(r); } });
       return nextQuery();
     });
   }
   return nextQuery().then(function () {
-    log("movie candidates: " + allResults.length);
-    if (!allResults.length) return [];
-    var match = findBestMatch(allResults, meta);
+    log("movie candidates: " + all.length);
+    if (!all.length) return [];
+    var match = findBestMatch(all, meta);
     if (!match) return [];
     return siteGet(match.url).then(function (html) {
       var servers = extractServers(html);
-      if (!servers) { log("no Servers object"); return []; }
+      if (!servers) { log("no Servers object found"); return []; }
       var labels = extractServerLabels(html);
-      var embedUrls = [];
-      Object.keys(labels).forEach(function (key) {
-        var url = servers[key];
-        if (url && /^https?:\/\//.test(url)) embedUrls.push({ url: url, label: labels[key] });
+      var embedList = [];
+      Object.keys(servers).forEach(function (k) {
+        var url = servers[k];
+        if (!url || !/^https?:\/\//i.test(url)) return;
+        var label = labels[k] || serverLabelFromHost(hostOf(url));
+        embedList.push({ url: url, label: label });
       });
-      log("movie servers found: " + embedUrls.length);
-      return buildStreams(embedUrls, title);
+      log("movie servers: " + embedList.map(function (e) { return e.label; }).join(", "));
+      return buildStreamsFromEmbeds(embedList, displayTitle);
     });
   });
 }
 
-function getTvStreams(meta, season, episode, title) {
+// ──────────────────────────── Series ─────────────────────────────────
+
+function getTvStreams(meta, season, episode, displayTitle) {
   var queries = meta.titles.slice(0, 3);
-  var allResults = [], seen = {};
-  var qi = 0;
+  var all = [], seen = {}, qi = 0;
   function nextQuery() {
     if (qi >= queries.length) return Promise.resolve();
-    return searchSite(queries[qi++]).then(function (results) {
-      results.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; allResults.push(r); } });
+    return searchSite(queries[qi++]).then(function (rs) {
+      rs.forEach(function (r) { if (!seen[r.url]) { seen[r.url] = 1; all.push(r); } });
       return nextQuery();
     });
   }
   return nextQuery().then(function () {
-    log("tv candidates: " + allResults.length);
-    if (!allResults.length) return [];
-    var match = findBestMatch(allResults, meta);
+    log("tv candidates: " + all.length);
+    if (!all.length) return [];
+    var match = findBestMatch(all, meta);
     if (!match) return [];
     return siteGet(match.url).then(function (html) {
       var eps = extractEpisodes(html);
-      if (!eps || !eps.post_id) { log("no Episodes object"); return []; }
+      if (!eps || !eps.post_id) { log("no Episodes object found"); return []; }
       var postId = eps.post_id;
       var serverLabels = extractTvServerLabels(html);
-      if (!serverLabels.length) { log("no TV servers"); return []; }
-      var embedUrls = [];
-      serverLabels.forEach(function (s) {
+      if (!serverLabels.length) { log("no TV server labels found"); return []; }
+      var embedList = serverLabels.map(function (s) {
         var url = BASE + "/?player_tv=" + postId + "&s=" + season + "&e=" + episode +
           "&sv=" + encodeURIComponent(s.host) + "&tv=true";
-        embedUrls.push({ url: url, label: s.label });
+        return { url: url, label: s.label };
       });
-      log("tv servers found: " + embedUrls.length);
-      return buildStreams(embedUrls, title);
+      log("tv servers: " + embedList.map(function (e) { return e.label; }).join(", "));
+      // For TV, the player_tv page is a proxy — don't try direct extraction there;
+      // we just return iframe streams with proper Referer set to the embed host if known.
+      return embedList.map(function (e) {
+        return {
+          name: PROVIDER_NAME + " " + e.label + " (iframe)",
+          title: displayTitle + " – " + e.label,
+          url: e.url,
+          quality: "Auto",
+          size: "Unknown",
+          type: "iframe",
+          headers: {
+            "User-Agent": UA_EMBED,
+            "Referer": BASE + "/"
+          },
+          provider: PROVIDER_ID
+        };
+      });
     });
   });
 }
+
+// ──────────────────────────── Entry point ────────────────────────────
 
 function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   var type = mediaType === "tv" || mediaType === "series" ? "tv" : "movie";
@@ -434,32 +480,16 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   }
 
   return fetchTmdb(tmdbId, type).then(function (data) {
-    var isTv = type === "tv";
-    var title = isTv ? (data.name || data.original_name) : (data.title || data.original_title);
-    var origTitle = isTv ? data.original_name : data.original_title;
-    var dateStr = isTv ? data.first_air_date : data.release_date;
-    var year = dateStr ? parseInt(String(dateStr).slice(0, 4), 10) : null;
+    var meta = buildMeta(data, type);
+    if (!meta.titles.length) { log("no usable title for TMDB " + tmdbId); return []; }
 
-    var titles = [title];
-    if (origTitle && origTitle !== title) titles.push(origTitle);
-    if (year) titles.push(title + " " + year);
+    var displayTitle = type === "tv"
+      ? meta.titles[0] + " S" + pad2(season) + "E" + pad2(episode)
+      : meta.titles[0] + (meta.year ? " (" + meta.year + ")" : "");
 
-    var targets = titles.map(function (t) { return normalizeText(t); });
+    log(type + ' "' + meta.titles[0] + '" year=' + meta.year + " queries=" + JSON.stringify(meta.titles.slice(0, 3)));
 
-    var meta = {
-      title: title,
-      year: isNaN(year) ? null : year,
-      titles: titles,
-      targets: targets
-    };
-
-    var displayTitle = isTv
-      ? title + " S" + (season < 10 ? "0" + season : season) + "E" + (episode < 10 ? "0" + episode : episode)
-      : title + (meta.year ? " (" + meta.year + ")" : "");
-
-    log(type + ' "' + title + '" year=' + meta.year + " queries=" + JSON.stringify(titles));
-
-    return isTv
+    return type === "tv"
       ? getTvStreams(meta, season, episode, displayTitle)
       : getMovieStreams(meta, displayTitle);
   }).catch(function (err) {
