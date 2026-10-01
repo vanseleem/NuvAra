@@ -240,7 +240,7 @@ function makeStream(url, label, playerUrl) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// NEW: Parse all servers from the play page
+// Parse all servers from the play page
 // ─────────────────────────────────────────────────────────────────────
 function parseServers(html) {
   var servers = [];
@@ -260,7 +260,8 @@ function parseServers(html) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// NEW: Resolve a single server (try direct m3u8/mp4, fallback to iframe)
+// Resolve a single server — ONLY returns direct m3u8/mp4.
+// If nothing extractable is found, returns [] (no dead iframe entries).
 // ─────────────────────────────────────────────────────────────────────
 function resolveServer(server) {
   var embedUrl = server.url;
@@ -272,30 +273,16 @@ function resolveServer(server) {
         return makeStream(u, label, embedUrl);
       });
     }
-    console.log("[DramaCafe] no direct URL for", server.name, "- returning iframe");
-    return [{
-      name: "☕ DramaCafe",
-      title: "☕ DramaCafe • " + server.name,
-      url: embedUrl,
-      quality: "Auto",
-      type: "iframe",
-      referer: BASE + "/"
-    }];
+    console.log("[DramaCafe] no direct URL for", server.name, "- skipping");
+    return [];
   }).catch(function(err) {
     console.log("[DramaCafe] server error:", server.name, err.message);
-    return [{
-      name: "☕ DramaCafe",
-      title: "☕ DramaCafe • " + server.name,
-      url: embedUrl,
-      quality: "Auto",
-      type: "iframe",
-      referer: BASE + "/"
-    }];
+    return [];
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// NEW: Fallback — old single-server behavior (embed.php + first iframe)
+// Fallback — old single-server path, but also only returns direct URLs
 // ─────────────────────────────────────────────────────────────────────
 function resolveSingleServer(vid) {
   var embedUrl = buildEmbedUrl(vid);
@@ -304,34 +291,23 @@ function resolveSingleServer(vid) {
     if (!playerUrl) return [];
     return fetchText(playerUrl, embedUrl).then(function(playerHtml) {
       var directUrls = extractStreamsFromPlayer(playerHtml);
-      if (directUrls.length) {
-        return directUrls.map(function(u, i) {
-          return makeStream(u, "Server " + (i + 1), playerUrl);
-        });
-      }
-      return [{
-        name: "☕ DramaCafe",
-        title: "☕ DramaCafe (Embed)",
-        url: playerUrl,
-        quality: "Auto",
-        type: "iframe",
-        referer: embedUrl
-      }];
+      if (!directUrls.length) return [];
+      return directUrls.map(function(u, i) {
+        return makeStream(u, "Server " + (i + 1), playerUrl);
+      });
     }).catch(function(err) {
-      return [{
-        name: "☕ DramaCafe",
-        title: "☕ DramaCafe (Embed)",
-        url: playerUrl,
-        quality: "Auto",
-        type: "iframe",
-        referer: embedUrl
-      }];
+      console.log("[DramaCafe] fallback player error:", err.message);
+      return [];
     });
+  }).catch(function(err) {
+    console.log("[DramaCafe] fallback embed error:", err.message);
+    return [];
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// MODIFIED: resolveVid now fetches play.php and returns ALL servers
+// resolveVid — fetches play.php, resolves every server, returns only
+// streams that resolve to a direct m3u8/mp4.
 // ─────────────────────────────────────────────────────────────────────
 function resolveVid(vid) {
   var playUrl = BASE + "/play.php?vid=" + vid;
@@ -348,7 +324,11 @@ function resolveVid(vid) {
     })).then(function(groups) {
       var all = [];
       groups.forEach(function(g) { all = all.concat(g); });
-      console.log("[DramaCafe] total streams:", all.length);
+      console.log("[DramaCafe] working streams:", all.length);
+      if (!all.length) {
+        console.log("[DramaCafe] none extracted, trying single-server fallback");
+        return resolveSingleServer(vid);
+      }
       return all;
     });
   }).catch(function(err) {
