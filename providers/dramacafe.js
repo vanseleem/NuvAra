@@ -1,18 +1,13 @@
-
-
 var BASE = "https://ddramacafe-tv.bar";
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-// ---------------------------------------------------------------- config
 var FETCH_TIMEOUT_MS = 12000;
-var MATCH_THRESHOLD = 0.5;        // minimum title score to accept a search result
-var MAX_MOVIE_VERSIONS = 2;       // the site sometimes has the same movie uploaded twice
-var VERSION_WINDOW = 0.25;        // 2nd upload must score within this of the best one
-var MAX_IFRAMES_PER_PAGE = 6;     // servers followed per embed/play page
+var MATCH_THRESHOLD = 0.5;
+var MAX_MOVIE_VERSIONS = 2;
+var VERSION_WINDOW = 0.25;
+var MAX_IFRAMES_PER_PAGE = 6;
 var INCLUDE_DOWNLOAD_LINKS = true;
-// The download mirrors (1fichier, Bowfile, ...) are landing pages, not direct
-// streams. They are returned as "open this page" entries using this type.
 var DOWNLOAD_ENTRY_TYPE = "iframe";
 
 // ---------------------------------------------------------------- http
@@ -72,10 +67,10 @@ function stripHtml(str) {
 
 function normalizeArabic(s) {
   return String(s || "")
-    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")   // diacritics + tatweel
-    .replace(/[\u0622\u0623\u0625]/g, "\u0627")    // alef variants
-    .replace(/\u0629/g, "\u0647")                  // teh marbuta
-    .replace(/\u0649/g, "\u064A");                 // alef maksura
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+    .replace(/[\u0622\u0623\u0625]/g, "\u0627")
+    .replace(/\u0629/g, "\u0647")
+    .replace(/\u0649/g, "\u064A");
 }
 
 function normalizeTitle(str) {
@@ -89,14 +84,12 @@ var NOISE = {};
 ["فيلم", "مسلسل", "مترجم", "مترجمه", "مدبلج", "مدبلجه", "كامل", "كامله",
  "اون", "لاين", "اونلاين", "hd"].forEach(function(w) { NOISE[normalizeArabic(w)] = 1; });
 
-// Title with filler words and the year removed (for matching).
 function cleanTitle(str) {
   var toks = normalizeTitle(str).split(" ").filter(function(t) { return t && !NOISE[t]; });
   var noYear = toks.filter(function(t) { return !/^(19|20)\d\d$/.test(t); });
   return (noYear.length ? noYear : toks).join(" ");
 }
 
-// a / b must already be cleaned.
 function similarity(a, b) {
   if (!a || !b) return 0;
   if (a === b) return 1;
@@ -118,14 +111,12 @@ function extractYear(str) {
   return all ? parseInt(all[all.length - 1], 10) : null;
 }
 
-// ---- season / episode parsing from titles
 var SEASON_WORDS = ["", "الأول", "الثاني", "الثالث", "الرابع", "الخامس",
                     "السادس", "السابع", "الثامن", "التاسع", "العاشر"];
 var SEASON_WORDS_N = SEASON_WORDS.map(normalizeArabic);
 var CUT_TOKENS = {};
 ["الحلقة", "الموسم", "الجزء", "episode", "season"].forEach(function(w) { CUT_TOKENS[normalizeArabic(w)] = 1; });
 
-// "مسلسل Squid Game الموسم الثاني الحلقة 1 مترجمة" -> "squid game"
 function seriesKey(title) {
   var toks = normalizeTitle(title).split(" ");
   var cut = toks.length;
@@ -141,7 +132,6 @@ function episodeFromTitle(title) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-// returns season number, or null if the title carries no season marker
 function seasonFromTitle(title) {
   var n = normalizeTitle(title);
   var m = n.match(/(?:الموسم|الجزء|season)\s*(\d+)/);
@@ -214,7 +204,6 @@ function getTmdbTitles(tmdbId, mediaType) {
 }
 
 // ---------------------------------------------------------------- site: search + watch pages
-// Every <a> that points at watch.php?vid=..., in document order.
 function parseWatchAnchors(html) {
   var out = [];
   var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
@@ -276,9 +265,6 @@ function searchMany(queries) {
 }
 
 // ---------------------------------------------------------------- site: episode list
-// Every watch page of a series prints the full "المواسم والحلقات" list:
-//   <a href="watch.php?vid=XXXX" title="...">  <em>1</em>حلقة </a>
-// One block per season, each restarting at episode 1. We group by that reset.
 function parseEpisodeGroups(html) {
   var eps = [];
   parseWatchAnchors(html).forEach(function(a) {
@@ -289,18 +275,17 @@ function parseEpisodeGroups(html) {
   });
   if (!eps.length) return [];
 
-  var desc = eps.length > 1 && eps[1].ep < eps[0].ep;   // newest-first listing
+  var desc = eps.length > 1 && eps[1].ep < eps[0].ep;
   var groups = [];
   var cur = null;
   var prev = 0;
-  eps.forEach(function(e, i) {
+  eps.forEach(function(e) {
     var reset = !cur || (desc ? e.ep >= prev : e.ep <= prev);
     if (reset) { cur = []; groups.push(cur); }
     cur.push(e);
     prev = e.ep;
   });
 
-  // drop duplicated lists (page printing the same block twice)
   var seen = {};
   var unique = [];
   groups.forEach(function(g) {
@@ -316,7 +301,6 @@ function pickFromGroups(groups, season, episode) {
   if (groups.length >= season) {
     g = groups[season - 1];
   } else if (groups.length === 1) {
-    // site lists each season as its own series: trust the season in the titles
     var st = seasonFromTitle(groups[0][0].title) || 1;
     if (st === season) g = groups[0];
   }
@@ -327,7 +311,6 @@ function pickFromGroups(groups, season, episode) {
   return null;
 }
 
-// Fallback when no episode list is available: use season/episode in the titles.
 function pickByTitle(items, season, episode) {
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
@@ -380,7 +363,6 @@ function unpackAll(html) {
 var ASSET_RE = /\.(?:js|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|json|xml)(?:[?#]|$)/i;
 var SITE_PAGE_RE = /\/(?:watch|category|index|view-serie|user|login|contact|search|topvideos|newvideos|moslslat)\.php/i;
 
-// All server/iframe URLs on a page (iframes, lazy iframes, data-embed style buttons, <option>s).
 function findPlayerIframes(html, baseUrl) {
   var urls = [];
   function add(raw) {
@@ -406,14 +388,12 @@ function findPlayerIframes(html, baseUrl) {
   return urls;
 }
 
-// All direct .m3u8 / .mp4 URLs in a page (including inside packed JS).
 function extractStreamsFromPlayer(playerHtml, baseUrl) {
   var streams = [];
   var seen = {};
   var unpacked = unpackAll(playerHtml);
   var search = (unpacked ? unpacked + "\n" : "") + String(playerHtml || "");
   search = search.replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
-  console.log("[DramaCafe] unpacked:", unpacked ? "yes (" + unpacked.length + " chars)" : "no");
 
   function add(raw) {
     var u = absUrl(raw, baseUrl);
@@ -437,11 +417,9 @@ function extractStreamsFromPlayer(playerHtml, baseUrl) {
     if (src) add(src);
   }
 
-  console.log("[DramaCafe] m3u8/mp4 found:", streams.length);
   return streams;
 }
 
-// Download mirrors listed on downloads.php
 function parseDownloadLinks(html) {
   var out = [];
   var seen = {};
@@ -477,20 +455,18 @@ function tagged(tag, label) {
   return tag ? tag + " \u2022 " + label : label;
 }
 
-// Auto-referer: uses the player's own origin (works for any host)
 function makeStream(url, label, playerUrl) {
   var origin = originOf(playerUrl) || BASE;
   var streamReferer = origin + "/";
-
   if (url.indexOf("http://") === 0) {
     url = "https://" + url.slice(7);
   }
-
   return {
     name: "⚜️ DramaCafe",
     title: label ? "⚜️ DramaCafe \u2022 " + label : "⚜️ DramaCafe",
     url: url,
     quality: qualityFromUrl(url),
+    provider: "dramacafe",
     referer: streamReferer,
     headers: {
       "User-Agent": UA,
@@ -508,12 +484,11 @@ function makeEmbedEntry(url, label, referer) {
     url: url,
     quality: "Auto",
     type: "iframe",
+    provider: "dramacafe",
     referer: referer
   };
 }
 
-// Fetch one player page (embed.php or play.php), follow every iframe on it.
-// Returns { direct: [{url, playerUrl}], embeds: [iframeUrl] } with stable order.
 function collectFromPage(pageUrl, referer) {
   return fetchText(pageUrl, referer).then(function(html) {
     var result = { direct: [], embeds: [] };
@@ -546,7 +521,6 @@ function collectFromPage(pageUrl, referer) {
 
 function emptyPage() { return { direct: [], embeds: [] }; }
 
-// Everything we can offer for one site video id.
 function resolveVid(vid, tag) {
   var watchUrl = BASE + "/watch.php?vid=" + vid;
   var embedUrl = BASE + "/embed.php?vid=" + vid;
@@ -572,7 +546,6 @@ function resolveVid(vid, tag) {
     var seen = {};
     var n = 0;
 
-    // 1) direct streams
     pages.forEach(function(p) {
       p.direct.forEach(function(d) {
         if (seen[d.url]) return;
@@ -583,7 +556,6 @@ function resolveVid(vid, tag) {
       });
     });
 
-    // 2) iframe-only servers (no direct URL could be extracted)
     var e = 0;
     pages.forEach(function(p) {
       p.embeds.forEach(function(u) {
@@ -594,7 +566,6 @@ function resolveVid(vid, tag) {
       });
     });
 
-    // 3) download mirrors
     r[2].forEach(function(link) {
       if (seen[link.url]) return;
       seen[link.url] = 1;
@@ -604,6 +575,7 @@ function resolveVid(vid, tag) {
         url: link.url,
         quality: "Download",
         type: DOWNLOAD_ENTRY_TYPE,
+        provider: "dramacafe",
         referer: BASE + "/"
       });
     });
@@ -677,14 +649,12 @@ function tryBuckets(buckets, i, season, episode) {
     return resolveVid(vid, "").then(function(s) { return s.length ? s : next(); });
   }
 
-  // search results already contain the exact season + episode
   var direct = pickByTitle(b.items, season, episode);
   if (direct) {
     console.log("[DramaCafe] direct title hit:", direct.title);
     return go(direct.vid);
   }
 
-  // otherwise read the season/episode list from any watch page of the series
   var rep = pickRepresentative(b.items, season);
   return fetchText(rep.url, BASE + "/").then(function(html) {
     var groups = parseEpisodeGroups(html);
@@ -740,10 +710,27 @@ function getTvStreams(tmdbId, season, episode) {
 // ---------------------------------------------------------------- entry point
 function getStreams(tmdbId, mediaType, season, episode) {
   console.log("[DramaCafe] getStreams:", tmdbId, mediaType, season, episode);
-  if (mediaType === "tv") return getTvStreams(tmdbId, season, episode);
-  return getMovieStreams(tmdbId);
+  var result;
+  try {
+    if (mediaType === "tv") {
+      result = getTvStreams(tmdbId, season, episode);
+    } else {
+      result = getMovieStreams(tmdbId);
+    }
+  } catch(e) {
+    console.log("[DramaCafe] fatal error:", e.message);
+    result = Promise.resolve([]);
+  }
+  return result.catch(function(e) {
+    console.log("[DramaCafe] uncaught error:", e.message);
+    return [];
+  });
 }
 
-module.exports = {
-  getStreams: getStreams
-};
+// ---------------------------------------------------------------- React Native / Hermes export
+// This dual export is REQUIRED — Hermes won't see module.exports in some contexts
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { getStreams: getStreams };
+} else {
+  global.getStreams = getStreams;
+}
