@@ -60,16 +60,19 @@ function originOf(u) {
 }
 
 function withTimeout(promise, ms, fallback) {
+  if (typeof setTimeout !== "function") return promise;
   return new Promise(function(resolve) {
     var done = false;
     var t = setTimeout(function() {
       if (!done) { done = true; resolve(fallback); }
     }, ms);
-    promise.then(function(v) {
-      if (!done) { done = true; clearTimeout(t); resolve(v); }
-    }, function() {
-      if (!done) { done = true; clearTimeout(t); resolve(fallback); }
-    });
+    function finish(v) {
+      if (done) return;
+      done = true;
+      if (typeof clearTimeout === "function") clearTimeout(t);
+      resolve(v);
+    }
+    promise.then(finish, function() { finish(fallback); });
   });
 }
 
