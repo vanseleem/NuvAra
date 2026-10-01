@@ -1,24 +1,22 @@
 /**
- * DramaCafe provider  (v3 — fixed fetch + parsing)
+ * DramaCafe provider  (v4 — working parser)
  *
- * Fixes vs v2:
- *  - Adds Referer + Accept-Language headers so the site returns real HTML.
- *  - Adds 4 fallback search URL patterns (search.php, /?s=, /search/, AJAX).
- *  - Lowered MATCH_THRESHOLD from 0.5 → 0.35.
- *  - parseWatchAnchors now handles absolute URLs, relative URLs, and
- *    protocol-relative URLs in href attributes.
- *  - Logs raw HTML size + first 200 chars when search returns 0 anchors,
- *    so you can see what the server actually sent.
- *  - BASE is a single constant — swap when the mirror changes.
+ * Fixes vs v3:
+ *  - parseWatchAnchors rewritten to match <a> tags by href directly.
+ *    The old regex required a closing </a> and could cross tag boundaries,
+ *    causing it to miss every link on the search results page.
+ *  - Verified against live site: search.php?keywords=inception returns
+ *    <a href="https://ddramacafe-tv.bar/watch.php?vid=e85b576d7" title="...">
+ *  - Referer + Accept-Language headers kept from v3.
+ *  - MATCH_THRESHOLD kept at 0.35.
  */
 
 var BASE = "https://ddramacafe-tv.bar";
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-// ---------------------------------------------------------------- config
 var FETCH_TIMEOUT_MS = 15000;
-var MATCH_THRESHOLD = 0.35;        // lowered from 0.5
+var MATCH_THRESHOLD = 0.35;
 var MAX_MOVIE_VERSIONS = 2;
 var VERSION_WINDOW = 0.25;
 var MAX_IFRAMES_PER_PAGE = 6;
@@ -221,22 +219,29 @@ function getTmdbTitles(tmdbId, mediaType) {
 }
 
 // ---------------------------------------------------------------- site: search + watch pages
+
+// FIXED: match <a> tags by href directly — no closing </a> needed
 function parseWatchAnchors(html) {
   var out = [];
-  var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  var m;
+  var seen = {};
   html = String(html || "");
+
+  var re = /<a\s+[^>]*?href\s*=\s*["']([^"']*watch\.php\?vid=([A-Za-z0-9_-]+))["'][^>]*>/gi;
+  var m;
   while ((m = re.exec(html)) !== null) {
-    var href = getAttr(m[1], "href");
-    if (!href) continue;
-    var vm = href.match(/watch\.php\?vid=([A-Za-z0-9_-]+)/i);
-    if (!vm) continue;
-    var inner = stripHtml(m[2]);
+    var vid = m[2];
+    if (seen[vid]) continue;
+    seen[vid] = 1;
+
+    var tagMatch = m[0];
+    var titleMatch = tagMatch.match(/title\s*=\s*["']([^"']*)["']/i);
+    var title = titleMatch ? decodeHtml(titleMatch[1]).trim() : "";
+
     out.push({
-      vid: vm[1],
-      url: BASE + "/watch.php?vid=" + vm[1],
-      title: getAttr(m[1], "title") || inner,
-      inner: inner
+      vid: vid,
+      url: BASE + "/watch.php?vid=" + vid,
+      title: title,
+      inner: ""
     });
   }
   return out;
@@ -256,41 +261,18 @@ function dedupeByVid(list) {
   return out;
 }
 
-// ---- SEARCH WITH FALLBACKS ----
 function searchDramaCafe(title) {
   var q = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  var patterns = [
-    BASE + "/search.php?keywords=" + encodeURIComponent(q),
-    BASE + "/?s=" + encodeURIComponent(q),
-    BASE + "/search/" + encodeURIComponent(q),
-    BASE + "/page_loading.php?link1=search&keyword=" + encodeURIComponent(q)
-  ];
-
-  var attempt = 0;
-  function tryNext() {
-    if (attempt >= patterns.length) {
-      console.log("[DramaCafe] all search patterns failed for:", q);
-      return Promise.resolve([]);
+  var url = BASE + "/search.php?keywords=" + encodeURIComponent(q);
+  console.log("[DramaCafe] Search:", q);
+  return fetchText(url, BASE + "/").then(function(html) {
+    var results = dedupeByVid(parseWatchAnchors(html));
+    console.log("[DramaCafe] Search results:", results.length, "(html size:", html.length + ")");
+    if (!results.length && html.length > 5000) {
+      console.log("[DramaCafe] page has content but no watch links — parser issue");
     }
-    var url = patterns[attempt++];
-    console.log("[DramaCafe] Search attempt " + attempt + ":", url);
-    return fetchText(url, BASE + "/").then(function(html) {
-      var results = dedupeByVid(parseWatchAnchors(html));
-      if (results.length) {
-        console.log("[DramaCafe] Search results:", results.length, "via pattern " + attempt);
-        return results;
-      }
-      console.log("[DramaCafe] pattern " + attempt + " returned 0 anchors (html size:", html.length + ")");
-      if (html.length < 2000) {
-        console.log("[DramaCafe] html preview:", html.slice(0, 200));
-      }
-      return tryNext();
-    }).catch(function(e) {
-      console.log("[DramaCafe] pattern " + attempt + " failed:", e.message);
-      return tryNext();
-    });
-  }
-  return tryNext();
+    return results;
+  });
 }
 
 function searchMany(queries) {
