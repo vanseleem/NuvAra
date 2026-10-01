@@ -3,7 +3,7 @@
   "version": "1.2.0",
   "scrapers": [
     {
-       "id": "rivestream-custom",
+  "id": "rivestream-custom",
   "name": "🌊 Rivestream",
   "description": "Rivestream.xyz servers (Vidlink, VidSrc, 2Embed, SuperEmbed, Embed.su and more) via page scrape + direct embed fallback",
   "version": "1.0.0",
