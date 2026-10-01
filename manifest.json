@@ -3,6 +3,20 @@
   "version": "1.2.0",
   "scrapers": [
     {
+      "id": "theflixbay",
+      "name": "TheFlixBay",
+      "description": "Movies and TV series from TheFlixBay",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/TFB.js",
+      "enabled": true,
+      "formats": ["iframe", "m3u8", "mp4"],
+      "contentLanguage": ["en"],
+      "limited": false,
+      "supportsExternalPlayer": true
+    },
+    {
       "id": "playimdb",
       "name": "PlayIMDb",
       "description": "High-Speed Direct Streaming for Movies",
