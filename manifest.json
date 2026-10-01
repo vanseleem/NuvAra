@@ -9,7 +9,7 @@
   "version": "1.0.0",
   "author": "",
   "supportedTypes": ["movie", "tv"],
-  "filename": "providers/rivestream.js",
+  "filename": "providers/riverstream.js",
   "enabled": true,
   "hasSettings": false,
   "formats": ["iframe"],
