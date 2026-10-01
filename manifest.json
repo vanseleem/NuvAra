@@ -3,18 +3,17 @@
   "version": "1.2.0",
   "scrapers": [
     {
-      "id": "playimdb",
-      "name": "PlayIMDb",
-      "description": "High-Speed Direct Streaming for Movies",
-      "version": "2.0.0",
-      "author": "PirateZoro9",
+       "id": "vidrock-custom",
+      "name": "🎸 VidRock",
+      "description": "VidRock servers (Orion, Luna, Atlas) via the encrypted API, HLS",
+      "version": "1.0.0",
+      "author": "",
       "supportedTypes": ["movie", "tv"],
-      "filename": "providers/playimdb.js",
+      "filename": "providers/vidrock.js",
       "enabled": true,
-      "formats": ["mp4", "mkv", "m3u8"],
-      "contentLanguage": ["en", "hi"],
-      "limited": false,
-      "supportsExternalPlayer": true
+      "hasSettings": false,
+      "formats": ["m3u8", "mp4"],
+      "contentLanguage": ["en"]
     },
     {
       "id": "netmirror",
