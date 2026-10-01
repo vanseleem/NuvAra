@@ -1,14 +1,14 @@
 /**
- * DramaCafe provider  (v4 — working parser)
+ * DramaCafe provider  (v1 — rebuilt from scratch)
  *
- * Fixes vs v3:
- *  - parseWatchAnchors rewritten to match <a> tags by href directly.
- *    The old regex required a closing </a> and could cross tag boundaries,
- *    causing it to miss every link on the search results page.
- *  - Verified against live site: search.php?keywords=inception returns
- *    <a href="https://ddramacafe-tv.bar/watch.php?vid=e85b576d7" title="...">
- *  - Referer + Accept-Language headers kept from v3.
- *  - MATCH_THRESHOLD kept at 0.35.
+ * Architecture (verified live):
+ *  1. search.php?keywords=Q        → HTML containing watch.php?vid= links
+ *  2. watch.php?vid=VID            → confirms video exists, provides title
+ *  3. ajax.php?p=video&do=getplayer&vid=VID&aid=1&player=detail&playlist=
+ *                                   → returns plain-text list of embed URLs
+ *  4. Each embed URL is returned as a separate stream entry
+ *
+ * Powered by PHP Melody CMS.
  */
 
 var BASE = "https://ddramacafe-tv.bar";
@@ -18,10 +18,6 @@ var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 var FETCH_TIMEOUT_MS = 15000;
 var MATCH_THRESHOLD = 0.35;
 var MAX_MOVIE_VERSIONS = 2;
-var VERSION_WINDOW = 0.25;
-var MAX_IFRAMES_PER_PAGE = 6;
-var INCLUDE_DOWNLOAD_LINKS = true;
-var DOWNLOAD_ENTRY_TYPE = "iframe";
 
 // ---------------------------------------------------------------- http
 function withTimeout(promise, ms, label) {
@@ -67,12 +63,9 @@ function decodeHtml(str) {
   return String(str || "")
     .replace(/&#x([0-9a-f]+);/gi, function(_, h) { return String.fromCharCode(parseInt(h, 16)); })
     .replace(/&#(\d+);/g, function(_, d) { return String.fromCharCode(parseInt(d, 10)); })
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&");
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
 }
 
 function stripHtml(str) {
@@ -90,8 +83,7 @@ function normalizeArabic(s) {
 function normalizeTitle(str) {
   return normalizeArabic(String(str || "").toLowerCase())
     .replace(/[^a-z0-9\u0600-\u06FF]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/\s+/g, " ").trim();
 }
 
 var NOISE = {};
@@ -165,19 +157,6 @@ function originOf(url) {
   return m ? m[1] : "";
 }
 
-function absUrl(u, base) {
-  u = decodeHtml(String(u || "")).trim();
-  if (!u) return "";
-  if (/^https?:\/\//i.test(u)) return u;
-  if (u.indexOf("//") === 0) return "https:" + u;
-  var origin = originOf(base) || BASE;
-  if (u.charAt(0) === "/") return origin + u;
-  var b = String(base || "").replace(/[?#].*$/, "");
-  var i = b.lastIndexOf("/");
-  var dir = i > 7 ? b.slice(0, i + 1) : origin + "/";
-  return dir + u;
-}
-
 function hostOf(url) {
   var m = String(url || "").match(/^https?:\/\/([^\/:?#]+)/i);
   return m ? m[1].replace(/^www\./, "") : "";
@@ -218,9 +197,7 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// ---------------------------------------------------------------- site: search + watch pages
-
-// FIXED: match <a> tags by href directly — no closing </a> needed
+// ---------------------------------------------------------------- search
 function parseWatchAnchors(html) {
   var out = [];
   var seen = {};
@@ -240,8 +217,7 @@ function parseWatchAnchors(html) {
     out.push({
       vid: vid,
       url: BASE + "/watch.php?vid=" + vid,
-      title: title,
-      inner: ""
+      title: title
     });
   }
   return out;
@@ -268,9 +244,6 @@ function searchDramaCafe(title) {
   return fetchText(url, BASE + "/").then(function(html) {
     var results = dedupeByVid(parseWatchAnchors(html));
     console.log("[DramaCafe] Search results:", results.length, "(html size:", html.length + ")");
-    if (!results.length && html.length > 5000) {
-      console.log("[DramaCafe] page has content but no watch links — parser issue");
-    }
     return results;
   });
 }
@@ -290,326 +263,106 @@ function searchMany(queries) {
   });
 }
 
-// ---------------------------------------------------------------- site: episode list
-function parseEpisodeGroups(html) {
-  var eps = [];
-  parseWatchAnchors(html).forEach(function(a) {
-    var m = a.inner.match(/^[\s\-\*\u2022]*(\d+)\s*\*?\s*حلق[ةه]\s*$/) ||
-            a.inner.match(/^[\s\-\*\u2022]*حلق[ةه]\s*\*?\s*(\d+)\s*$/);
-    if (!m) return;
-    eps.push({ ep: parseInt(m[1], 10), vid: a.vid, title: a.title });
-  });
-  if (!eps.length) return [];
+// ---------------------------------------------------------------- AJAX player
+/**
+ * Confirmed live: this endpoint returns plain text inside
+ * <div id="Playerholder"> with one or more embed URLs.
+ */
+function fetchPlayerSources(vid) {
+  var url = BASE + "/ajax.php?p=video&do=getplayer&vid=" +
+    encodeURIComponent(vid) + "&aid=1&player=detail&playlist=";
+  console.log("[DramaCafe] AJAX player:", url);
 
-  var desc = eps.length > 1 && eps[1].ep < eps[0].ep;
-  var groups = [];
-  var cur = null;
-  var prev = 0;
-  eps.forEach(function(e, i) {
-    var reset = !cur || (desc ? e.ep >= prev : e.ep <= prev);
-    if (reset) { cur = []; groups.push(cur); }
-    cur.push(e);
-    prev = e.ep;
-  });
+  return fetchText(url, BASE + "/watch.php?vid=" + vid).then(function(html) {
+    var urls = [];
+    var seen = {};
 
-  var seen = {};
-  var unique = [];
-  groups.forEach(function(g) {
-    var key = g.map(function(e) { return e.vid; }).join(",");
-    if (!seen[key]) { seen[key] = 1; unique.push(g); }
-  });
-  return unique;
-}
-
-function pickFromGroups(groups, season, episode) {
-  if (!groups || !groups.length) return null;
-  var g = null;
-  if (groups.length >= season) {
-    g = groups[season - 1];
-  } else if (groups.length === 1) {
-    var st = seasonFromTitle(groups[0][0].title) || 1;
-    if (st === season) g = groups[0];
-  }
-  if (!g) return null;
-  for (var i = 0; i < g.length; i++) {
-    if (g[i].ep === episode) return g[i].vid;
-  }
-  return null;
-}
-
-function pickByTitle(items, season, episode) {
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    if (episodeFromTitle(it.title) === episode && (seasonFromTitle(it.title) || 1) === season) return it;
-  }
-  return null;
-}
-
-function pickRepresentative(items, season) {
-  for (var i = 0; i < items.length; i++) {
-    if ((seasonFromTitle(items[i].title) || 1) === season) return items[i];
-  }
-  return items[0];
-}
-
-// ---------------------------------------------------------------- unpacker
-function packerEncode(c, a) {
-  return (c < a ? "" : packerEncode(parseInt(c / a, 10), a)) +
-         ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
-}
-
-function unpackAll(html) {
-  var out = [];
-  var re = /eval\(function\(p,a,c,k,e,(?:d|r)\)\{[\s\S]*?\}\(\s*'([\s\S]*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*?)'\s*\.split\('\|'\)/g;
-  var m;
-  html = String(html || "");
-  while ((m = re.exec(html)) !== null) {
-    var payload = m[1].replace(/\\(?:u([0-9a-fA-F]{4})|([\s\S]))/g, function(_, hex, ch) {
-      if (hex) return String.fromCharCode(parseInt(hex, 16));
-      if (ch === "n") return "\n";
-      if (ch === "t") return "\t";
-      return ch;
-    });
-    var base = parseInt(m[2], 10);
-    var count = parseInt(m[3], 10);
-    var keywords = m[4].split("|");
-    while (count--) {
-      if (keywords[count]) {
-        var key = keywords[count];
-        var pat = new RegExp("\\b" + packerEncode(count, base) + "\\b", "g");
-        payload = payload.replace(pat, function() { return key; });
-      }
+    // Extract all http(s) URLs from the response
+    var re = /https?:\/\/[^\s"'<>]+/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var u = m[0].replace(/&amp;/g, "&").trim();
+      if (!u || seen[u]) continue;
+      // Skip the site's own URLs
+      if (originOf(u) === BASE) continue;
+      seen[u] = 1;
+      urls.push(u);
     }
-    out.push(payload);
-  }
-  return out.join("\n");
+
+    console.log("[DramaCafe] Player sources found:", urls.length);
+    return urls;
+  }).catch(function(e) {
+    console.log("[DramaCafe] AJAX player failed:", e.message);
+    return [];
+  });
 }
 
-// ---------------------------------------------------------------- player pages
-var ASSET_RE = /\.(?:js|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|json|xml)(?:[?#]|$)/i;
-var SITE_PAGE_RE = /\/(?:watch|category|index|view-serie|user|login|contact|search|topvideos|newvideos|moslslat)\.php/i;
-
-function findPlayerIframes(html, baseUrl) {
-  var urls = [];
-  function add(raw) {
-    var u = absUrl(raw, baseUrl);
-    if (!/^https?:\/\//i.test(u)) return;
-    if (ASSET_RE.test(u) || SITE_PAGE_RE.test(u)) return;
-    if (urls.indexOf(u) === -1) urls.push(u);
-  }
-  html = String(html || "");
-  var m;
-
-  var reIframe = /<iframe\b([^>]*)>/gi;
-  while ((m = reIframe.exec(html)) !== null) {
-    add(getAttr(m[1], "src") || getAttr(m[1], "data-src") || getAttr(m[1], "data-lazy-src"));
-  }
-
-  var reData = /\sdata-(?:embed|iframe|player|video|server|link|url|src)\s*=\s*["']((?:https?:)?\/\/[^"']+)["']/gi;
-  while ((m = reData.exec(html)) !== null) add(m[1]);
-
-  var reOpt = /<option\b[^>]*\bvalue\s*=\s*["']((?:https?:)?\/\/[^"']+)["']/gi;
-  while ((m = reOpt.exec(html)) !== null) add(m[1]);
-
-  return urls;
-}
-
-function extractStreamsFromPlayer(playerHtml, baseUrl) {
-  var streams = [];
-  var seen = {};
-  var unpacked = unpackAll(playerHtml);
-  var search = (unpacked ? unpacked + "\n" : "") + String(playerHtml || "");
-  search = search.replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
-  console.log("[DramaCafe] unpacked:", unpacked ? "yes (" + unpacked.length + " chars)" : "no");
-
-  function add(raw) {
-    var u = absUrl(raw, baseUrl);
-    if (!/^https?:\/\//i.test(u)) return;
-    if (ASSET_RE.test(u)) return;
-    if (seen[u]) return;
-    seen[u] = 1;
-    streams.push(u);
-  }
-
-  var m;
-  var reAbs = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)(?![A-Za-z0-9_.\-])(?:\?[^"'\s<>\\]*)?/gi;
-  while ((m = reAbs.exec(search)) !== null) add(m[0]);
-
-  var reKey = /(?:file|source|src|url|hls\d*|link|video_url|stream)["']?\s*[:=]\s*["']([^"']+?\.(?:m3u8|mp4)(?![A-Za-z0-9_.\-])[^"']*)["']/gi;
-  while ((m = reKey.exec(search)) !== null) add(m[1]);
-
-  var reTag = /<(?:source|video)\b([^>]*)>/gi;
-  while ((m = reTag.exec(search)) !== null) {
-    var src = getAttr(m[1], "src");
-    if (src) add(src);
-  }
-
-  console.log("[DramaCafe] m3u8/mp4 found:", streams.length);
-  return streams;
-}
-
-function parseDownloadLinks(html) {
-  var out = [];
-  var seen = {};
-  var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  var m;
-  html = String(html || "");
-  while ((m = re.exec(html)) !== null) {
-    var href = decodeHtml(getAttr(m[1], "href"));
-    if (!/^https?:\/\//i.test(href)) continue;
-    if (originOf(href) === BASE || /downloads\.php/i.test(href)) continue;
-    var txt = stripHtml(m[2]);
-    if (txt.indexOf("للتحميل") === -1) continue;
-    if (seen[href]) continue;
-    seen[href] = 1;
-    var name = txt.replace(/اضغط هنا للتحميل/g, "").replace(/[\*\s]+/g, " ").trim() || hostOf(href);
-    out.push({ name: name, url: href });
-  }
-  return out;
-}
+// ---------------------------------------------------------------- stream builder
+var QUALITY_RANK_AUTO = 1080;
 
 function qualityFromUrl(url) {
   var s = String(url).toLowerCase();
-  if (/2160|4k/.test(s)) return "4K";
+  if (/2160|4k/.test(s)) return "2160p";
   if (/1440/.test(s)) return "1440p";
   if (/1080/.test(s)) return "1080p";
   if (/720/.test(s)) return "720p";
   if (/480/.test(s)) return "480p";
   if (/360/.test(s)) return "360p";
-  return "Unknown";
+  if (/240/.test(s)) return "240p";
+  return "Auto";
 }
 
-function tagged(tag, label) {
-  return tag ? tag + " \u2022 " + label : label;
+function qualityRank(q) {
+  if (q === "Auto") return QUALITY_RANK_AUTO;
+  var n = parseInt(q, 10);
+  return isNaN(n) ? 0 : n;
 }
 
-function makeStream(url, label, playerUrl) {
-  var origin = originOf(playerUrl) || BASE;
-  var streamReferer = origin + "/";
-
-  if (url.indexOf("http://") === 0) {
-    url = "https://" + url.slice(7);
-  }
-
-  return {
-    name: "⚜️ DramaCafe",
-    title: label ? "⚜️ DramaCafe \u2022 " + label : "⚜️ DramaCafe",
-    url: url,
-    quality: qualityFromUrl(url),
-    referer: streamReferer,
-    headers: {
-      "User-Agent": UA,
-      "Referer": streamReferer,
-      "Origin": origin,
-      "Accept": "*/*"
-    }
-  };
+function serverLabelFromUrl(url) {
+  var h = hostOf(url);
+  if (/vidspeed/.test(h)) return "Vidspeed";
+  if (/uqload/.test(h)) return "Uqload";
+  if (/ds2play/.test(h)) return "DS2Play";
+  if (/ok\.ru/.test(h)) return "OK.ru";
+  if (/voe\.sx/.test(h)) return "Voe";
+  if (/yourupload/.test(h)) return "YourUpload";
+  if (/dailymotion/.test(h)) return "Dailymotion";
+  if (/youtube/.test(h)) return "YouTube";
+  if (/vidmoly/.test(h)) return "Vidmoly";
+  if (/mixdrop/.test(h)) return "Mixdrop";
+  return h.split(".").slice(-2, -1)[0] || h;
 }
 
-function makeEmbedEntry(url, label, referer) {
-  return {
-    name: "☕ DramaCafe",
-    title: label ? "☕ DramaCafe \u2022 " + label : "☕ DramaCafe (Embed)",
-    url: url,
-    quality: "Auto",
-    type: "iframe",
-    referer: referer
-  };
-}
+function buildStreamsFromSources(sources, displayTitle) {
+  var streams = [];
+  var seen = {};
 
-function collectFromPage(pageUrl, referer) {
-  return fetchText(pageUrl, referer).then(function(html) {
-    var result = { direct: [], embeds: [] };
-    extractStreamsFromPlayer(html, pageUrl).forEach(function(u) {
-      result.direct.push({ url: u, playerUrl: pageUrl });
-    });
+  sources.forEach(function(url) {
+    if (seen[url]) return;
+    seen[url] = 1;
 
-    var iframes = findPlayerIframes(html, pageUrl).slice(0, MAX_IFRAMES_PER_PAGE);
-    console.log("[DramaCafe]", pageUrl.replace(BASE, ""), "-> iframes:", iframes.length);
+    var label = serverLabelFromUrl(url);
+    var quality = qualityFromUrl(url);
+    var origin = originOf(url);
 
-    return Promise.all(iframes.map(function(f) {
-      return fetchText(f, pageUrl).then(function(ph) {
-        return { frame: f, urls: extractStreamsFromPlayer(ph, f) };
-      }).catch(function(err) {
-        console.log("[DramaCafe] player failed:", f, err.message);
-        return { frame: f, urls: [] };
-      });
-    })).then(function(frames) {
-      frames.forEach(function(fr) {
-        if (fr.urls.length) {
-          fr.urls.forEach(function(u) { result.direct.push({ url: u, playerUrl: fr.frame }); });
-        } else {
-          result.embeds.push(fr.frame);
-        }
-      });
-      return result;
+    streams.push({
+      name: "⚜️ DramaCafe " + label + " " + quality,
+      title: displayTitle + " • " + label,
+      url: url,
+      quality: quality,
+      size: "Unknown",
+      type: "iframe",
+      headers: {
+        "User-Agent": UA,
+        "Referer": BASE + "/",
+        "Origin": BASE
+      },
+      provider: "dramacafe"
     });
   });
-}
 
-function emptyPage() { return { direct: [], embeds: [] }; }
-
-function resolveVid(vid, tag) {
-  var watchUrl = BASE + "/watch.php?vid=" + vid;
-  var embedUrl = BASE + "/embed.php?vid=" + vid;
-  var playUrl = BASE + "/play.php?vid=" + vid;
-  var dlUrl = BASE + "/downloads.php?vid=" + vid;
-  console.log("[DramaCafe] resolve vid:", vid);
-
-  return Promise.all([
-    collectFromPage(embedUrl, watchUrl).catch(function(e) {
-      console.log("[DramaCafe] embed.php failed:", e.message); return emptyPage();
-    }),
-    collectFromPage(playUrl, watchUrl).catch(function(e) {
-      console.log("[DramaCafe] play.php failed:", e.message); return emptyPage();
-    }),
-    INCLUDE_DOWNLOAD_LINKS
-      ? fetchText(dlUrl, watchUrl).then(parseDownloadLinks).catch(function(e) {
-          console.log("[DramaCafe] downloads.php failed:", e.message); return [];
-        })
-      : Promise.resolve([])
-  ]).then(function(r) {
-    var pages = [r[0], r[1]];
-    var out = [];
-    var seen = {};
-    var n = 0;
-
-    pages.forEach(function(p) {
-      p.direct.forEach(function(d) {
-        if (seen[d.url]) return;
-        seen[d.url] = 1;
-        n++;
-        var host = hostOf(d.playerUrl);
-        out.push(makeStream(d.url, tagged(tag, "Server " + n + (host ? " (" + host + ")" : "")), d.playerUrl));
-      });
-    });
-
-    var e = 0;
-    pages.forEach(function(p) {
-      p.embeds.forEach(function(u) {
-        if (seen[u]) return;
-        seen[u] = 1;
-        e++;
-        out.push(makeEmbedEntry(u, tagged(tag, "Embed " + e + " (" + hostOf(u) + ")"), embedUrl));
-      });
-    });
-
-    r[2].forEach(function(link) {
-      if (seen[link.url]) return;
-      seen[link.url] = 1;
-      out.push({
-        name: "⬇️ DramaCafe",
-        title: "⬇️ DramaCafe \u2022 " + tagged(tag, link.name + " (download page)"),
-        url: link.url,
-        quality: "Download",
-        type: DOWNLOAD_ENTRY_TYPE,
-        referer: BASE + "/"
-      });
-    });
-
-    console.log("[DramaCafe] vid", vid, "->", out.length, "links (direct:", n, "embeds:", e, "downloads:", r[2].length + ")");
-    return out;
-  });
+  streams.sort(function(a, b) { return qualityRank(b.quality) - qualityRank(a.quality); });
+  return streams;
 }
 
 // ---------------------------------------------------------------- movies
@@ -641,15 +394,22 @@ function getMovieStreams(tmdbId) {
       if (!scored.length) return [];
 
       var top = scored[0].s;
-      var picks = scored.filter(function(x) { return x.s >= top - VERSION_WINDOW; }).slice(0, MAX_MOVIE_VERSIONS);
+      var picks = scored.filter(function(x) { return x.s >= top - 0.25; }).slice(0, MAX_MOVIE_VERSIONS);
       console.log("[DramaCafe] Movie picks:", picks.map(function(p) { return p.r.title + " (" + p.s.toFixed(2) + ")"; }).join(" | "));
 
-      return Promise.all(picks.map(function(p, i) {
-        return resolveVid(p.r.vid, picks.length > 1 ? "V" + (i + 1) : "").catch(function() { return []; });
-      })).then(function(groups) {
-        var out = [];
-        groups.forEach(function(g) { out = out.concat(g); });
-        return out;
+      return Promise.all(picks.map(function(p) {
+        return fetchPlayerSources(p.r.vid).then(function(sources) {
+          return { sources: sources, title: p.r.title };
+        }).catch(function() { return { sources: [], title: p.r.title }; });
+      })).then(function(results) {
+        var allStreams = [];
+        results.forEach(function(res) {
+          var displayTitle = res.title;
+          buildStreamsFromSources(res.sources, displayTitle).forEach(function(s) {
+            allStreams.push(s);
+          });
+        });
+        return allStreams;
       });
     });
   }).catch(function(err) {
@@ -666,33 +426,6 @@ function bestTitleScore(key, titles) {
     if (sc > s) s = sc;
   });
   return s;
-}
-
-function tryBuckets(buckets, i, season, episode) {
-  if (i >= buckets.length) return Promise.resolve([]);
-  var b = buckets[i];
-  function next() { return tryBuckets(buckets, i + 1, season, episode); }
-  function go(vid) {
-    return resolveVid(vid, "").then(function(s) { return s.length ? s : next(); });
-  }
-
-  var direct = pickByTitle(b.items, season, episode);
-  if (direct) {
-    console.log("[DramaCafe] direct title hit:", direct.title);
-    return go(direct.vid);
-  }
-
-  var rep = pickRepresentative(b.items, season);
-  return fetchText(rep.url, BASE + "/").then(function(html) {
-    var groups = parseEpisodeGroups(html);
-    console.log("[DramaCafe] episode list:", groups.map(function(g) { return g.length; }).join("/") || "none");
-    var vid = pickFromGroups(groups, season, episode);
-    if (!vid) return next();
-    return go(vid);
-  }).catch(function(err) {
-    console.log("[DramaCafe] series page failed:", err.message);
-    return next();
-  });
 }
 
 function getTvStreams(tmdbId, season, episode) {
@@ -714,7 +447,7 @@ function getTvStreams(tmdbId, season, episode) {
       all.forEach(function(r) {
         var k = seriesKey(r.title);
         if (!k) return;
-        if (!buckets[k]) buckets[k] = { key: k, items: [], score: 0 };
+        if (!buckets[k]) buckets[k] = { key: k, items: [] };
         buckets[k].items.push(r);
       });
 
@@ -726,7 +459,31 @@ function getTvStreams(tmdbId, season, episode) {
         .sort(function(a, b) { return b.score - a.score; });
 
       console.log("[DramaCafe] Series matches:", ranked.map(function(b) { return b.key + " (" + b.score.toFixed(2) + ")"; }).join(" | ") || "none");
-      return tryBuckets(ranked.slice(0, 3), 0, wantedSeason, wantedEp);
+
+      // Try direct episode match in search results first
+      for (var i = 0; i < ranked.length; i++) {
+        var b = ranked[i];
+        for (var j = 0; j < b.items.length; j++) {
+          var it = b.items[j];
+          if (episodeFromTitle(it.title) === wantedEp &&
+              (seasonFromTitle(it.title) || 1) === wantedSeason) {
+            console.log("[DramaCafe] direct episode hit:", it.title);
+            return fetchPlayerSources(it.vid).then(function(sources) {
+              return buildStreamsFromSources(sources, it.title);
+            });
+          }
+        }
+      }
+
+      // Fallback: use first matching series entry
+      if (ranked.length) {
+        var rep = ranked[0].items[0];
+        return fetchPlayerSources(rep.vid).then(function(sources) {
+          return buildStreamsFromSources(sources, rep.title);
+        });
+      }
+
+      return [];
     });
   }).catch(function(err) {
     console.log("[DramaCafe] TV error:", err.message);
@@ -741,6 +498,4 @@ function getStreams(tmdbId, mediaType, season, episode) {
   return getMovieStreams(tmdbId);
 }
 
-module.exports = {
-  getStreams: getStreams
-};
+module.exports = { getStreams: getStreams };
