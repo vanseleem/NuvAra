@@ -138,7 +138,6 @@ function buildEmbedUrl(vid) {
 }
 
 function findPlayerIframe(embedHtml) {
-  // Generic: find any iframe on the embed page
   var m = embedHtml.match(/<iframe[^>]*src=["']([^"']+)["']/i);
   if (m) {
     var u = decodeHtml(m[1]);
@@ -146,7 +145,6 @@ function findPlayerIframe(embedHtml) {
     if (u.indexOf("/") === 0) u = BASE + u;
     return u;
   }
-  // Fallback: contentUrl meta
   m = embedHtml.match(/contentUrl["'][^>]*content=["']([^"']+)["']/i);
   if (m) {
     var u2 = decodeHtml(m[1]);
@@ -213,13 +211,11 @@ function qualityFromUrl(url) {
   return "Unknown";
 }
 
-// Extract origin from a URL: "https://foo.bar/path" -> "https://foo.bar"
 function originOf(url) {
   var m = String(url || "").match(/^(https?:\/\/[^\/]+)/i);
   return m ? m[1] : "";
 }
 
-// Auto-referer: uses the player's own origin (works for any host)
 function makeStream(url, label, playerUrl) {
   var origin = originOf(playerUrl) || BASE;
   var streamReferer = origin + "/";
@@ -243,12 +239,68 @@ function makeStream(url, label, playerUrl) {
   };
 }
 
-function resolveVid(vid) {
+// ─────────────────────────────────────────────────────────────────────
+// NEW: Parse all servers from the play page
+// ─────────────────────────────────────────────────────────────────────
+function parseServers(html) {
+  var servers = [];
+  var seen = {};
+  var liRegex = /<li[^>]*data-embed-url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/li>/gi;
+  var m;
+  while ((m = liRegex.exec(html)) !== null) {
+    var url = decodeHtml(m[1]);
+    if (seen[url]) continue;
+    seen[url] = 1;
+    var inner = m[2];
+    var nameMatch = inner.match(/<strong>([^<]*)<\/strong>/i);
+    var name = nameMatch ? nameMatch[1].trim() : "Server " + (servers.length + 1);
+    servers.push({ name: name, url: url });
+  }
+  return servers;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// NEW: Resolve a single server (try direct m3u8/mp4, fallback to iframe)
+// ─────────────────────────────────────────────────────────────────────
+function resolveServer(server) {
+  var embedUrl = server.url;
+  return fetchText(embedUrl, BASE + "/").then(function(playerHtml) {
+    var directUrls = extractStreamsFromPlayer(playerHtml);
+    if (directUrls.length) {
+      return directUrls.map(function(u, i) {
+        var label = server.name + (directUrls.length > 1 ? " #" + (i + 1) : "");
+        return makeStream(u, label, embedUrl);
+      });
+    }
+    console.log("[DramaCafe] no direct URL for", server.name, "- returning iframe");
+    return [{
+      name: "☕ DramaCafe",
+      title: "☕ DramaCafe • " + server.name,
+      url: embedUrl,
+      quality: "Auto",
+      type: "iframe",
+      referer: BASE + "/"
+    }];
+  }).catch(function(err) {
+    console.log("[DramaCafe] server error:", server.name, err.message);
+    return [{
+      name: "☕ DramaCafe",
+      title: "☕ DramaCafe • " + server.name,
+      url: embedUrl,
+      quality: "Auto",
+      type: "iframe",
+      referer: BASE + "/"
+    }];
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// NEW: Fallback — old single-server behavior (embed.php + first iframe)
+// ─────────────────────────────────────────────────────────────────────
+function resolveSingleServer(vid) {
   var embedUrl = buildEmbedUrl(vid);
-  console.log("[DramaCafe] embed:", embedUrl);
   return fetchText(embedUrl, BASE + "/").then(function(embedHtml) {
     var playerUrl = findPlayerIframe(embedHtml);
-    console.log("[DramaCafe] player:", playerUrl || "NOT FOUND");
     if (!playerUrl) return [];
     return fetchText(playerUrl, embedUrl).then(function(playerHtml) {
       var directUrls = extractStreamsFromPlayer(playerHtml);
@@ -257,7 +309,6 @@ function resolveVid(vid) {
           return makeStream(u, "Server " + (i + 1), playerUrl);
         });
       }
-      console.log("[DramaCafe] No direct URL — returning embed fallback");
       return [{
         name: "☕ DramaCafe",
         title: "☕ DramaCafe (Embed)",
@@ -267,7 +318,6 @@ function resolveVid(vid) {
         referer: embedUrl
       }];
     }).catch(function(err) {
-      console.log("[DramaCafe] player failed:", err.message);
       return [{
         name: "☕ DramaCafe",
         title: "☕ DramaCafe (Embed)",
@@ -277,6 +327,33 @@ function resolveVid(vid) {
         referer: embedUrl
       }];
     });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MODIFIED: resolveVid now fetches play.php and returns ALL servers
+// ─────────────────────────────────────────────────────────────────────
+function resolveVid(vid) {
+  var playUrl = BASE + "/play.php?vid=" + vid;
+  console.log("[DramaCafe] play:", playUrl);
+  return fetchText(playUrl, BASE + "/").then(function(playHtml) {
+    var servers = parseServers(playHtml);
+    console.log("[DramaCafe] servers found:", servers.length);
+    if (!servers.length) {
+      console.log("[DramaCafe] no servers, falling back to single server");
+      return resolveSingleServer(vid);
+    }
+    return Promise.all(servers.map(function(s) {
+      return resolveServer(s);
+    })).then(function(groups) {
+      var all = [];
+      groups.forEach(function(g) { all = all.concat(g); });
+      console.log("[DramaCafe] total streams:", all.length);
+      return all;
+    });
+  }).catch(function(err) {
+    console.log("[DramaCafe] play page error:", err.message);
+    return resolveSingleServer(vid);
   });
 }
 
