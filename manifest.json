@@ -3,17 +3,17 @@
   "version": "1.2.0",
   "scrapers": [
     {
-       "id": "vidrock-custom",
-      "name": "🎸 VidRock",
-      "description": "VidRock servers (Orion, Luna, Atlas) via the encrypted API, HLS",
-      "version": "1.0.0",
-      "author": "",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/vidrock.js",
-      "enabled": true,
-      "hasSettings": false,
-      "formats": ["m3u8", "mp4"],
-      "contentLanguage": ["en"]
+       "id": "rivestream-custom",
+  "name": "🌊 Rivestream",
+  "description": "Rivestream.xyz servers (Vidlink, VidSrc, 2Embed, SuperEmbed, Embed.su and more) via page scrape + direct embed fallback",
+  "version": "1.0.0",
+  "author": "",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/rivestream.js",
+  "enabled": true,
+  "hasSettings": false,
+  "formats": ["iframe"],
+  "contentLanguage": ["en"]
     },
     {
       "id": "netmirror",
