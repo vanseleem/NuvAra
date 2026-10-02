@@ -17,6 +17,20 @@
       "supportsExternalPlayer": true
     },
     {
+  "id": "ridomovies",
+  "name": "RidoMovies",
+  "description": "Movies and TV series from RidoMovies",
+  "version": "1.0.0",
+  "author": "vanseleem",
+  "supportedTypes": ["movie", "tv"],
+  "filename": "providers/ridomovies.js",
+  "enabled": true,
+  "formats": ["m3u8", "mp4"],
+  "contentLanguage": ["en"],
+  "limited": false,
+  "supportsExternalPlayer": true
+    },
+    {
       "id": "netmirror",
       "name": "NetMirror",
       "description": "Netflix | Prime | Disney",
