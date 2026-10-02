@@ -1,28 +1,29 @@
 /**
- * RidoMovies provider  (v2 — corrected from Streamflix source)
+ * HiMovies.ac provider
  *
- * REAL API (verified from stantanasi/streamflix RidomoviesProvider.kt):
- *  - Search:       GET /core/api/search?q={query}
- *  - Movie videos: GET /core/api/movies/{slug}/videos
- *  - TV seasons:   GET /core/api/series/{slug}/seasons
- *  - Episodes:     GET /core/api/series/{slug}/seasons/{seasonId}/episodes
- *  - Ep videos:    GET /core/api/episodes/{id}/videos
+ * Architecture (verified against Thanatoslayer6/Himovies-Unofficial-API + live site):
+ *  - Search:          GET /search/{query}                → HTML (.film-detail)
+ *  - Movie servers:   GET /ajax/movie/episodes/{movieId} → HTML (<a data-id>)
+ *  - TV seasons:      GET /ajax/v2/tv/seasons/{tvId}     → HTML (<a data-id>)
+ *  - TV episodes:     GET /ajax/v2/season/episodes/{sid} → HTML (.eps-item)
+ *  - Episode servers: GET /ajax/v2/episode/servers/{eid} → HTML (<a data-id>)
+ *  - Stream link:     GET /ajax/sources/{serverId}       → JSON {link: "..."}
+ *                     Referer: {BASE}/watch-movie/{movieId}.{serverId}
  *
- * The `url` field in video responses contains HTML: <iframe data-src="...">
- * The `data-src` is the embed URL (closeload.top / ridorapid.closeload.top).
- *
- * My previous version guessed /api/player-url + data-player-token — both wrong.
+ * The AJAX endpoints require X-Requested-With header and Referer.
+ * The final link points to an external embed host (mzzcloud.life, streamsb, etc.)
+ * returned as an iframe stream with proper headers.
  */
 
-var BASE = "https://ridomovies.tv";
-var PROVIDER_ID = "ridomovies";
-var PROVIDER_NAME = "🎬 RidoMovies";
+var BASE = "https://himovies.ac";
+var PROVIDER_ID = "himovies";
+var PROVIDER_NAME = "🎬 HiMovies";
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
-var MATCH_THRESHOLD = 0.35;
 var FETCH_TIMEOUT_MS = 15000;
+var MATCH_THRESHOLD = 0.35;
 
-function log(m) { console.log("[RidoMovies] " + m); }
+function log(m) { console.log("[HiMovies] " + m); }
 
 // ---------------------------------------------------------------- http
 function withTimeout(promise, ms) {
@@ -40,14 +41,15 @@ function withTimeout(promise, ms) {
   });
 }
 
-function fetchText(url, referer) {
+function fetchText(url, referer, ajax) {
   url = String(url).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
   var headers = {
     "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": ajax ? "application/json, text/javascript, */*; q=0.01" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9"
   };
   if (referer) headers["Referer"] = String(referer).replace(/[^\x00-\x7F]/g, function(c) { return encodeURIComponent(c); });
+  if (ajax) headers["X-Requested-With"] = "XMLHttpRequest";
   return withTimeout(
     fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
@@ -58,18 +60,9 @@ function fetchText(url, referer) {
 }
 
 function fetchJson(url, referer) {
-  var headers = {
-    "User-Agent": UA,
-    "Accept": "application/json, text/plain, */*"
-  };
-  if (referer) headers["Referer"] = referer;
-  return withTimeout(
-    fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    }),
-    FETCH_TIMEOUT_MS
-  );
+  return fetchText(url, referer, true).then(function(t) {
+    try { return JSON.parse(t); } catch (e) { return null; }
+  });
 }
 
 // ---------------------------------------------------------------- helpers
@@ -80,6 +73,10 @@ function decodeHtml(str) {
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+}
+
+function stripHtml(str) {
+  return decodeHtml(String(str || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
 function normalizeTitle(str) {
@@ -104,14 +101,11 @@ function similarity(a, b) {
   return common / Math.max(aa.length, bb.length);
 }
 
-function originOf(url) {
-  var m = String(url || "").match(/^(https?:\/\/[^\/]+)/i);
-  return m ? m[1] : "";
-}
-
-function hostOf(url) {
-  var m = String(url || "").match(/^https?:\/\/([^\/:?#]+)/i);
-  return m ? m[1].replace(/^www\./, "") : "";
+function getAttr(attrs, name) {
+  var re = new RegExp("(?:^|[\\s\"'])" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
+  var m = String(attrs || "").match(re);
+  if (!m) return "";
+  return decodeHtml(m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]));
 }
 
 // ---------------------------------------------------------------- TMDB
@@ -140,24 +134,49 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// ---------------------------------------------------------------- search API
-// GET /core/api/search?q={query}
-// Response: { code, message, data: { items: [{ slug, title, type, ... }] } }
-function searchRidoMovies(query) {
+// ---------------------------------------------------------------- search
+// Each result: <div class="film-detail">
+//   <h2 class="film-name"><a href="/movie/slug-HASH" title="Title">Title</a></h2>
+//   <div class="fd-infor">... year ...</div>
+function parseSearchResults(html) {
+  var out = []; var seen = {};
+  var re = /<div[^>]*class="[^"]*film-detail[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+  var m;
+  html = String(html || "");
+  while ((m = re.exec(html)) !== null) {
+    var block = m[1];
+    var aMatch = block.match(/<a\s+href="(\/(?:movie|tv)\/[^"]+)"[^>]*title="([^"]*)"/i) ||
+                 block.match(/<a\s+title="([^"]*)"[^>]*href="(\/(?:movie|tv)\/[^"]+)"/i);
+    if (!aMatch) continue;
+    var href, title;
+    if (aMatch[1].indexOf("/") === 0) { href = aMatch[1]; title = decodeHtml(aMatch[2]); }
+    else { title = decodeHtml(aMatch[1]); href = aMatch[2]; }
+    var hm = href.match(/\/(movie|tv)\/([^"?#]+)/i);
+    if (!hm) continue;
+    var kind = hm[1].toLowerCase() === "movie" ? "movie" : "series";
+    var slug = hm[2];
+    var key = kind + ":" + slug;
+    if (seen[key]) continue;
+    seen[key] = 1;
+    var yearMatch = block.match(/\b(19|20)\d\d\b/);
+    out.push({
+      slug: slug,
+      kind: kind,
+      title: title.replace(/\s*\(.*?\)\s*$/, "").trim(),
+      year: yearMatch ? yearMatch[0] : "",
+      url: BASE + href
+    });
+  }
+  log("Parsed search results: " + out.length);
+  return out;
+}
+
+function searchHiMovies(query) {
   var q = String(query || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  var url = BASE + "/core/api/search?q=" + encodeURIComponent(q);
-  log("Search: " + q);
-  return fetchJson(url, BASE + "/").then(function(res) {
-    var items = (res && res.data && res.data.items) || [];
-    log("Search results: " + items.length);
-    return items.map(function(it) {
-      return {
-        slug: it.slug || it.fullSlug,
-        title: it.title || (it.contentable && it.contentable.originalTitle) || "",
-        type: it.type || "",
-        year: (it.contentable && it.contentable.releaseYear) || ""
-      };
-    }).filter(function(x) { return x.slug && x.title; });
+  var url = BASE + "/search/" + encodeURIComponent(q).replace(/%20/g, "-");
+  log("Search: " + q + " → " + url);
+  return fetchText(url, BASE + "/").then(function(html) {
+    return parseSearchResults(html);
   }).catch(function(e) {
     log("Search failed: " + e.message);
     return [];
@@ -165,13 +184,13 @@ function searchRidoMovies(query) {
 }
 
 function searchMany(titles) {
-  return Promise.all(titles.map(function(t) {
-    return searchRidoMovies(t);
-  })).then(function(groups) {
+  var uniq = [];
+  titles.forEach(function(t) { if (t && uniq.indexOf(t) === -1) uniq.push(t); });
+  return Promise.all(uniq.map(searchHiMovies)).then(function(groups) {
     var all = []; var seen = {};
     groups.forEach(function(g) {
       g.forEach(function(r) {
-        var k = r.slug;
+        var k = r.kind + ":" + r.slug;
         if (!seen[k]) { seen[k] = 1; all.push(r); }
       });
     });
@@ -180,267 +199,132 @@ function searchMany(titles) {
   });
 }
 
-function chooseResult(results, titles) {
+function chooseResult(results, titles, wantKind, year) {
   var best = null; var bestScore = 0;
   results.forEach(function(r) {
+    if (wantKind && r.kind !== wantKind) return;
     var s = 0;
     titles.forEach(function(t) {
       var sc = similarity(r.title, t);
       if (sc > s) s = sc;
     });
+    if (year && r.year && Math.abs(Number(r.year) - Number(year)) <= 1) s += 0.15;
     if (s > bestScore) { bestScore = s; best = r; }
   });
-  if (best) log("Best: " + best.title + " (" + best.slug + ") score=" + bestScore.toFixed(3));
+  if (best) log("Best: " + best.title + " (" + best.kind + ", " + best.year + ") score=" + bestScore.toFixed(3));
   return bestScore >= MATCH_THRESHOLD ? best : null;
 }
 
-// ---------------------------------------------------------------- video API
-// GET /core/api/movies/{slug}/videos
-// Response: { data: [{ id, link, lang, quality, url }] }
-//   url = HTML string like: <iframe data-src="https://closeload.top/..."></iframe>
-function extractIframeSrc(html) {
-  var s = String(html || "");
-  // Primary: data-src (what Streamflix uses)
-  var m = s.match(/<iframe[^>]*\sdata-src\s*=\s*["']([^"']+)["']/i);
-  if (m) return decodeHtml(m[1]);
-  // Fallback: src
-  m = s.match(/<iframe[^>]*\ssrc\s*=\s*["']([^"']+)["']/i);
-  if (m) return decodeHtml(m[1]);
-  // Fallback: any https URL in the string
-  m = s.match(/(https?:\/\/[^"'\s<>]+)/i);
-  if (m) return m[1];
-  return null;
-}
-
-function getMovieVideos(slug) {
-  var url = BASE + "/core/api/movies/" + encodeURIComponent(slug) + "/videos";
-  log("Movie videos API: " + url);
-  return fetchJson(url, BASE + "/movies/" + slug).then(function(res) {
-    var videos = (res && res.data) || [];
-    log("Video entries: " + videos.length);
-    var servers = [];
-    videos.forEach(function(v) {
-      var src = extractIframeSrc(v.url);
-      if (!src) return;
-      if (src.indexOf("//") === 0) src = "https:" + src;
-      if (src.indexOf("http") !== 0) return;
-      servers.push({
-        id: v.id,
-        quality: v.quality || "Auto",
-        lang: v.lang || "",
-        url: src,
-        host: hostOf(src)
-      });
-    });
-    log("Extracted servers: " + servers.length + " [" + servers.map(function(s) { return s.host + "/" + s.quality; }).join(", ") + "]");
-    return servers;
-  }).catch(function(e) {
-    log("Movie videos failed: " + e.message);
-    return [];
-  });
-}
-
-function getEpisodeVideos(episodeId) {
-  var url = BASE + "/core/api/episodes/" + encodeURIComponent(episodeId) + "/videos";
-  log("Episode videos API: " + url);
-  return fetchJson(url, BASE + "/").then(function(res) {
-    var videos = (res && res.data) || [];
-    var servers = [];
-    videos.forEach(function(v) {
-      var src = extractIframeSrc(v.url);
-      if (!src) return;
-      if (src.indexOf("//") === 0) src = "https:" + src;
-      if (src.indexOf("http") !== 0) return;
-      servers.push({
-        id: v.id,
-        quality: v.quality || "Auto",
-        lang: v.lang || "",
-        url: src,
-        host: hostOf(src)
-      });
-    });
-    log("Episode servers: " + servers.length);
-    return servers;
-  }).catch(function(e) {
-    log("Episode videos failed: " + e.message);
-    return [];
-  });
-}
-
-// TV: get seasons, then find the episode, then get its videos
-function getTvServers(slug, season, episode) {
-  var seasonsUrl = BASE + "/core/api/series/" + encodeURIComponent(slug) + "/seasons";
-  log("Seasons API: " + seasonsUrl);
-  return fetchJson(seasonsUrl, BASE + "/tv/" + slug).then(function(res) {
-    var seasons = (res && res.data && res.data.items) || [];
-    log("Seasons: " + seasons.length);
-    var target = seasons.filter(function(s) {
-      return String(s.seasonNumber) === String(season);
-    })[0];
-    if (!target) {
-      log("Season " + season + " not found");
-      return [];
-    }
-    var epsUrl = BASE + "/core/api/series/" + encodeURIComponent(slug) +
-      "/seasons/" + encodeURIComponent(target.id) + "/episodes";
-    log("Episodes API: " + epsUrl);
-    return fetchJson(epsUrl, BASE + "/tv/" + slug).then(function(epsRes) {
-      var episodes = (epsRes && epsRes.data && epsRes.data.items) || [];
-      log("Episodes: " + episodes.length);
-      var targetEp = episodes.filter(function(e) {
-        return String(e.episodeNumber) === String(episode);
-      })[0];
-      if (!targetEp) {
-        log("Episode " + episode + " not found");
-        return [];
-      }
-      return getEpisodeVideos(targetEp.id);
-    });
-  }).catch(function(e) {
-    log("TV API failed: " + e.message);
-    return [];
-  });
-}
-
-// ---------------------------------------------------------------- closeload extractor
-// Streamflix uses ROT13 -> Base64 -> Reverse (Smart Brute Force).
-// We try all permutations of those transforms.
-
-function rot13(s) {
-  return String(s).replace(/[a-zA-Z]/g, function(c) {
-    var base = c <= "Z" ? 65 : 97;
-    return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
-  });
-}
-
-function b64decode(s) {
-  try {
-    if (typeof atob === "function") return atob(s);
-    if (typeof Buffer !== "undefined") return Buffer.from(s, "base64").toString("binary");
-  } catch (e) {}
-  return "";
-}
-
-function reverse(s) {
-  return String(s).split("").reverse().join("");
-}
-
-function smartDecode(input) {
-  var transforms = [
-    { name: "rot13", fn: rot13 },
-    { name: "b64", fn: b64decode },
-    { name: "rev", fn: reverse }
-  ];
-  var seen = {};
-  seen[input] = 1;
-  var candidates = [input];
-  var urls = [];
-
-  for (var depth = 0; depth < 4; depth++) {
-    var next = [];
-    for (var ci = 0; ci < candidates.length; ci++) {
-      var c = candidates[ci];
-      for (var ti = 0; ti < transforms.length; ti++) {
-        var t = transforms[ti];
-        var out;
-        try { out = t.fn(c); } catch (e) { continue; }
-        if (!out || out === c || out.length < 8) continue;
-        if (seen[out]) continue;
-        seen[out] = 1;
-        next.push(out);
-        // Extract any URLs
-        var re = /https?:\/\/[^"'\s<>\\]+/gi;
-        var m;
-        while ((m = re.exec(out)) !== null) {
-          if (urls.indexOf(m[0]) === -1) urls.push(m[0]);
-        }
-        // Also check for direct m3u8/mp4 markers
-        if (/\.m3u8|\.mp4/i.test(out)) {
-          var re2 = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
-          while ((m = re2.exec(out)) !== null) {
-            if (urls.indexOf(m[0]) === -1) urls.push(m[0]);
-          }
-        }
-      }
-    }
-    candidates = next;
-    if (urls.length) break;
-  }
-  return urls;
-}
-
-function extractCloseload(embedUrl, referer) {
-  log("Closeload: " + embedUrl);
-  return fetchText(embedUrl, referer).then(function(html) {
-    var urls = [];
-
-    // Direct m3u8/mp4 in page
-    var re = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
-    var m;
-    while ((m = re.exec(html)) !== null) urls.push(m[0]);
-
-    // Packed eval
-    if (!urls.length) {
-      var unpacked = unpackAll(html);
-      if (unpacked) {
-        var re2 = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
-        while ((m = re2.exec(unpacked)) !== null) urls.push(m[0]);
-      }
-    }
-
-    // Encoded strings
-    if (!urls.length) {
-      var reEnc = /["']([A-Za-z0-9+\/=_-]{30,})["']/g;
-      while ((m = reEnc.exec(html)) !== null) {
-        smartDecode(m[1]).forEach(function(u) {
-          if (urls.indexOf(u) === -1) urls.push(u);
-        });
-      }
-    }
-
-    log("Closeload streams: " + urls.length);
-    return urls;
-  }).catch(function(e) {
-    log("Closeload failed: " + e.message);
-    return [];
-  });
-}
-
-// ---------------------------------------------------------------- p.a.c.k.e.r
-function packerEncode(c, a) {
-  return (c < a ? "" : packerEncode(parseInt(c / a, 10), a)) +
-    ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
-}
-
-function unpackAll(html) {
-  var out = [];
-  var re = /eval\(function\(p,a,c,k,e,(?:d|r)\)\{[\s\S]*?\}\(\s*'([\s\S]*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*?)'\s*\.split\('\|'\)/g;
+// ---------------------------------------------------------------- server lists
+// <a data-id="SID" data-linkid="SID"><span>ServerName</span></a>
+function parseServerAnchors(html) {
+  var out = []; var seen = {};
+  var re = /<a\b([^>]*data-(?:id|linkid)="[^"]+"[^>]*)>([\s\S]*?)<\/a>/gi;
   var m;
   html = String(html || "");
   while ((m = re.exec(html)) !== null) {
-    var payload = m[1].replace(/\\(?:u([0-9a-fA-F]{4})|([\s\S]))/g, function(_, hex, ch) {
-      if (hex) return String.fromCharCode(parseInt(hex, 16));
-      if (ch === "n") return "\n";
-      if (ch === "t") return "\t";
-      return ch;
-    });
-    var base = parseInt(m[2], 10);
-    var count = parseInt(m[3], 10);
-    var keywords = m[4].split("|");
-    while (count--) {
-      if (keywords[count]) {
-        var key = keywords[count];
-        var pat = new RegExp("\\b" + packerEncode(count, base) + "\\b", "g");
-        payload = payload.replace(pat, function() { return key; });
-      }
-    }
-    out.push(payload);
+    var sid = getAttr(m[1], "data-id") || getAttr(m[1], "data-linkid");
+    if (!sid || seen[sid]) continue;
+    seen[sid] = 1;
+    var name = stripHtml(m[2]);
+    if (!name) name = "Server " + sid;
+    out.push({ serverId: sid, name: name });
   }
-  return out.join("\n");
+  return out;
+}
+
+function getMovieServers(movieSlug) {
+  var url = BASE + "/ajax/movie/episodes/" + encodeURIComponent(movieSlug);
+  log("Movie servers: " + url);
+  return fetchText(url, BASE + "/movie/" + movieSlug, true).then(function(html) {
+    var servers = parseServerAnchors(html);
+    log("Movie server count: " + servers.length + " [" + servers.map(function(s) { return s.name; }).join(", ") + "]");
+    return servers;
+  }).catch(function(e) {
+    log("Movie servers failed: " + e.message);
+    return [];
+  });
+}
+
+function getTvSeasons(tvSlug) {
+  var url = BASE + "/ajax/v2/tv/seasons/" + encodeURIComponent(tvSlug);
+  log("TV seasons: " + url);
+  return fetchText(url, BASE + "/tv/" + tvSlug, true).then(function(html) {
+    var out = []; var seen = {};
+    var re = /<a\b([^>]*data-id="[^"]+"[^>]*)>([\s\S]*?)<\/a>/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var sid = getAttr(m[1], "data-id");
+      if (!sid || seen[sid]) continue;
+      seen[sid] = 1;
+      var name = stripHtml(m[2]);
+      var numMatch = name.match(/(\d+)/);
+      out.push({ seasonId: sid, name: name, number: numMatch ? parseInt(numMatch[1], 10) : null });
+    }
+    log("Seasons: " + out.length);
+    return out;
+  }).catch(function(e) {
+    log("Seasons failed: " + e.message);
+    return [];
+  });
+}
+
+function getEpisodes(seasonId) {
+  var url = BASE + "/ajax/v2/season/episodes/" + encodeURIComponent(seasonId);
+  log("Episodes: " + url);
+  return fetchText(url, BASE + "/", true).then(function(html) {
+    var out = []; var seen = {};
+    var re = /<a\b([^>]*class="[^"]*eps-item[^"]*"[^>]*)>([\s\S]*?)<\/a>/gi;
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      var eid = getAttr(m[1], "data-id");
+      if (!eid || seen[eid]) continue;
+      seen[eid] = 1;
+      var title = getAttr(m[1], "title") || stripHtml(m[2]);
+      var numMatch = title.match(/(\d+)/);
+      out.push({ episodeId: eid, title: title, number: numMatch ? parseInt(numMatch[1], 10) : null });
+    }
+    log("Episodes: " + out.length);
+    return out;
+  }).catch(function(e) {
+    log("Episodes failed: " + e.message);
+    return [];
+  });
+}
+
+function getEpisodeServers(episodeId) {
+  var url = BASE + "/ajax/v2/episode/servers/" + encodeURIComponent(episodeId);
+  log("Episode servers: " + url);
+  return fetchText(url, BASE + "/", true).then(function(html) {
+    return parseServerAnchors(html);
+  }).catch(function(e) {
+    log("Episode servers failed: " + e.message);
+    return [];
+  });
+}
+
+// ---------------------------------------------------------------- stream link
+// GET /ajax/sources/{serverId}
+// Referer: {BASE}/watch-movie/{movieSlug}.{serverId}   (movies)
+//         {BASE}/watch-tv/{tvSlug}.{serverId}          (tv — appears to use the slug too)
+function getSourceLink(serverId, refererUrl) {
+  var url = BASE + "/ajax/sources/" + encodeURIComponent(serverId);
+  log("Source link: " + url);
+  return fetchJson(url, refererUrl).then(function(res) {
+    if (!res) { log("No JSON from sources"); return null; }
+    var link = res.link || res.url || (res.data && res.data.link);
+    if (!link) { log("No link in JSON: " + JSON.stringify(res).slice(0, 200)); return null; }
+    if (link.indexOf("//") === 0) link = "https:" + link;
+    log("Stream link: " + link.slice(0, 100));
+    return link;
+  }).catch(function(e) {
+    log("Source link failed: " + e.message);
+    return null;
+  });
 }
 
 // ---------------------------------------------------------------- build streams
-function qualityFromUrl(url, fallback) {
+function qualityFromUrl(url) {
   var s = String(url).toLowerCase();
   if (/2160|4k/.test(s)) return "2160p";
   if (/1440/.test(s)) return "1440p";
@@ -448,90 +332,67 @@ function qualityFromUrl(url, fallback) {
   if (/720/.test(s)) return "720p";
   if (/480/.test(s)) return "480p";
   if (/360/.test(s)) return "360p";
-  return fallback || "Auto";
+  return "Auto";
 }
 
-function serverLabelFromUrl(url) {
-  var h = hostOf(url).toLowerCase();
-  if (/closeload/.test(h)) return "Closeload";
-  if (/ridorapid/.test(h)) return "RidoRapid";
-  if (/vidsrc/.test(h)) return "Vidsrc";
-  if (/voe\.sx/.test(h)) return "Voe";
+function hostLabel(url) {
+  var m = String(url || "").match(/^https?:\/\/(?:www\.)?([^\/:?#]+)/i);
+  var h = m ? m[1].toLowerCase() : "";
+  if (/mzzcloud/.test(h)) return "MzzCloud";
+  if (/streamsb/.test(h)) return "StreamSB";
+  if (/upcloud/.test(h)) return "UpCloud";
+  if (/vidcloud/.test(h)) return "VidCloud";
+  if (/megacloud/.test(h)) return "MegaCloud";
+  if (/vidstreaming/.test(h)) return "VidStreaming";
+  if (/dood/.test(h)) return "Dood";
+  if (/streamtape/.test(h)) return "StreamTape";
+  if (/voe/.test(h)) return "Voe";
   if (/filemoon/.test(h)) return "Filemoon";
   return h.split(".").slice(-2, -1)[0] || h;
 }
 
-function buildStreams(servers, pageUrl, tag) {
-  // servers: [{ url, quality, lang, host }]
-  // Each server is an iframe URL from the API. Try to resolve to direct m3u8.
-  return Promise.all(servers.map(function(srv) {
-    return extractCloseload(srv.url, pageUrl).then(function(directUrls) {
-      var items = [];
-      if (directUrls.length) {
-        directUrls.forEach(function(u) {
-          items.push({
-            url: u,
-            quality: qualityFromUrl(u, srv.quality),
-            label: serverLabelFromUrl(u) + " " + (srv.quality || ""),
-            direct: true
-          });
-        });
-      } else {
-        // Fallback: return the iframe URL
-        items.push({
-          url: srv.url,
-          quality: srv.quality || "Auto",
-          label: serverLabelFromUrl(srv.url) + " (iframe)",
-          direct: false
-        });
-      }
-      return items;
-    });
-  })).then(function(groups) {
-    var out = []; var seen = {};
-    groups.forEach(function(g) {
-      g.forEach(function(it) {
-        if (seen[it.url]) return;
-        seen[it.url] = 1;
-        var isHls = /\.m3u8/i.test(it.url);
-        var origin = originOf(pageUrl);
-        out.push({
-          name: PROVIDER_NAME + " " + (tag ? tag + " " : "") + it.label,
-          title: PROVIDER_NAME + " • " + (tag ? tag + " " : "") + it.label,
-          url: it.url,
-          quality: it.quality,
-          size: "Unknown",
-          type: it.direct ? (isHls ? "hls" : "mp4") : "iframe",
-          headers: {
-            "User-Agent": UA,
-            "Referer": it.direct ? (originOf(it.url) + "/") : pageUrl,
-            "Origin": originOf(it.url) || origin,
-            "Accept": "*/*"
-          },
-          provider: PROVIDER_ID
-        });
-      });
-    });
-    // Direct streams first
-    out.sort(function(a, b) {
-      return (a.type === "iframe" ? 1 : 0) - (b.type === "iframe" ? 1 : 0);
-    });
-    log("Total streams: " + out.length + " (direct: " + out.filter(function(s) { return s.type !== "iframe"; }).length + ")");
-    return out;
-  });
+function makeStream(link, serverName, tag, pageUrl) {
+  var origin = "https://himovies.ac";
+  var isHls = /\.m3u8/i.test(link);
+  var type = isHls ? "hls" : "iframe";
+  return {
+    name: PROVIDER_NAME + " " + serverName + (tag ? " " + tag : ""),
+    title: PROVIDER_NAME + " • " + serverName + (tag ? " " + tag : "") + " (" + hostLabel(link) + ")",
+    url: link,
+    quality: isHls ? "Auto" : qualityFromUrl(link),
+    size: "Unknown",
+    type: type,
+    headers: {
+      "User-Agent": UA,
+      "Referer": origin + "/",
+      "Origin": origin,
+      "Accept": "*/*"
+    },
+    provider: PROVIDER_ID
+  };
 }
 
 // ---------------------------------------------------------------- movie flow
 function getMovieStreams(tmdbId) {
   return getTmdbTitles(tmdbId, "movie").then(function(meta) {
     return searchMany(meta.titles).then(function(all) {
-      var best = chooseResult(all, meta.titles);
-      if (!best) return [];
+      var best = chooseResult(all, meta.titles, "movie", meta.year);
+      if (!best) { log("No movie match"); return []; }
       log("Resolving movie: " + best.slug);
-      return getMovieVideos(best.slug).then(function(servers) {
+      return getMovieServers(best.slug).then(function(servers) {
         if (!servers.length) return [];
-        var title = best.title + (meta.year ? " (" + meta.year + ")" : "");
-        return buildStreams(servers, BASE + "/movies/" + best.slug, title);
+        var refererBase = BASE + "/movie/" + best.slug;
+        return Promise.all(servers.map(function(srv) {
+          var watchUrl = BASE + "/watch-movie/" + best.slug + "." + srv.serverId;
+          return getSourceLink(srv.serverId, watchUrl).then(function(link) {
+            if (!link) return null;
+            return makeStream(link, srv.name, "", refererBase);
+          });
+        })).then(function(list) {
+          var out = list.filter(Boolean);
+          log("Total movie streams: " + out.length);
+          return out;
+        });
       });
     });
   }).catch(function(err) {
@@ -546,14 +407,45 @@ function getTvStreams(tmdbId, season, episode) {
   var e = Number(episode) || 1;
   return getTmdbTitles(tmdbId, "tv").then(function(meta) {
     return searchMany(meta.titles).then(function(all) {
-      var best = chooseResult(all, meta.titles);
-      if (!best) return [];
-      log("Resolving TV: " + best.slug + " S" + s + "E" + e);
-      return getTvServers(best.slug, s, e).then(function(servers) {
-        if (!servers.length) return [];
-        var tag = "S" + (s < 10 ? "0" + s : s) + "E" + (e < 10 ? "0" + e : e);
-        var title = best.title + " " + tag;
-        return buildStreams(servers, BASE + "/tv/" + best.slug, title);
+      var best = chooseResult(all, meta.titles, "series", null);
+      if (!best) { log("No series match"); return []; }
+      log("Resolving series: " + best.slug + " S" + s + "E" + e);
+      return getTvSeasons(best.slug).then(function(seasons) {
+        if (!seasons.length) return [];
+        var targetSeason = null;
+        for (var i = 0; i < seasons.length; i++) {
+          if (seasons[i].number === s) { targetSeason = seasons[i]; break; }
+        }
+        if (!targetSeason) targetSeason = seasons[0];
+        log("Using season: " + targetSeason.name + " (" + targetSeason.seasonId + ")");
+        return getEpisodes(targetSeason.seasonId).then(function(episodes) {
+          if (!episodes.length) return [];
+          var targetEp = null;
+          for (var j = 0; j < episodes.length; j++) {
+            if (episodes[j].number === e) { targetEp = episodes[j]; break; }
+          }
+          if (!targetEp) {
+            log("Episode " + e + " not found");
+            return [];
+          }
+          log("Using episode: " + targetEp.title + " (" + targetEp.episodeId + ")");
+          return getEpisodeServers(targetEp.episodeId).then(function(servers) {
+            if (!servers.length) return [];
+            var tag = "S" + (s < 10 ? "0" + s : s) + "E" + (e < 10 ? "0" + e : e);
+            var refererBase = BASE + "/tv/" + best.slug;
+            return Promise.all(servers.map(function(srv) {
+              var watchUrl = BASE + "/watch-tv/" + best.slug + "." + srv.serverId;
+              return getSourceLink(srv.serverId, watchUrl).then(function(link) {
+                if (!link) return null;
+                return makeStream(link, srv.name, tag, refererBase);
+              });
+            })).then(function(list) {
+              var out = list.filter(Boolean);
+              log("Total TV streams: " + out.length);
+              return out;
+            });
+          });
+        });
       });
     });
   }).catch(function(err) {
