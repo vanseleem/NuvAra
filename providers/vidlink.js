@@ -1,371 +1,405 @@
+var API_BASE = "https://vidlink.pro";
+var ENC_RELAY = "https://enc-dec.app/api/enc-vidlink?text=";
+var KEY_HEX = "c75136c5668bbfe65a7ecad431a745db68b5f381555b38d8f6c699449cf11fcd";
+var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
+var TOKEN_TTL = 480;
+var CHECK_TIMEOUT = 12000;
 
+/* ---------- helpers ---------- */
 
-var API_URL = 'https://vidlink.pro/api/b';
-var PROVIDER_ID = 'vidlink';
-var PROVIDER_NAME = 'VidLink';
-var REFERER = 'https://vidlink.pro/';
-var ORIGIN = 'https://vidlink.pro';
-
-var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-var REQUEST_TIMEOUT = 15000;
-
-// AES-256-CBC key (hex) recovered from vidlink.pro frontend
-var KEY_HEX = '2de6e6ea13a9df9503b11a6117fd7e51941e04a0c223dfeacfe8a1dbb6c52783';
-
-var WORKING_HEADERS = {
-  'User-Agent': UA,
-  'Referer': REFERER,
-  'Origin': ORIGIN,
-  'Accept': '*/*',
-};
-
-// ─────────────────────────────── Logging ──────────────────────────────
-
-function log(message) {
-  console.log('[VidLink] ' + message);
+function withTimeout(promise, ms, fallback) {
+  if (typeof setTimeout !== "function") return promise;
+  return new Promise(function(resolve) {
+    var done = false;
+    var t = setTimeout(function() {
+      if (!done) { done = true; resolve(fallback); }
+    }, ms);
+    function finish(v) {
+      if (done) return;
+      done = true;
+      if (typeof clearTimeout === "function") clearTimeout(t);
+      resolve(v);
+    }
+    promise.then(finish, function() { finish(fallback); });
+  });
 }
 
-// ──────────────────────────── Crypto (pure JS AES) ────────────────────
-
-// Minimal AES-256-CBC implementation (no Node crypto dependency).
-// Adapted from public-domain JS AES implementations for Hermes compatibility.
-
-var AES = (function () {
-  var SBOX = new Uint8Array(256);
-  var INV_SBOX = new Uint8Array(256);
-  var RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
-
-  (function init() {
-    var p = 1, q = 1;
-    do {
-      p = p ^ (p << 1) ^ (p & 0x80 ? 0x11b : 0);
-      p &= 0xff;
-      q ^= q << 1; q ^= q << 2; q ^= q << 4; q &= 0xff;
-      if (q & 0x80) q ^= 0x09;
-      var x = q ^ (q << 1) ^ (q << 2) ^ (q << 3) ^ (q << 4);
-      x &= 0xff;
-      SBOX[p] = x ^ 0x63;
-    } while (p !== 1);
-    SBOX[0] = 0x63;
-    for (var i = 0; i < 256; i++) INV_SBOX[SBOX[i]] = i;
-  })();
-
-  function xtime(a) { return ((a << 1) ^ (a & 0x80 ? 0x1b : 0)) & 0xff; }
-  function mul(a, b) {
-    var r = 0;
-    while (b) { if (b & 1) r ^= a; a = xtime(a); b >>= 1; }
-    return r;
-  }
-
-  function expandKey(key) {
-    var Nk = key.length / 4;
-    var Nr = Nk + 6;
-    var w = [];
-    for (var i = 0; i < Nk; i++) w[i] = [key[4*i], key[4*i+1], key[4*i+2], key[4*i+3]];
-    for (var i = Nk; i < 4 * (Nr + 1); i++) {
-      var temp = w[i-1].slice();
-      if (i % Nk === 0) {
-        temp.push(temp.shift());
-        temp = temp.map(function (b) { return SBOX[b]; });
-        temp[0] ^= RCON[(i / Nk) - 1];
-      } else if (Nk > 6 && i % Nk === 4) {
-        temp = temp.map(function (b) { return SBOX[b]; });
-      }
-      w[i] = w[i-Nk].map(function (b, j) { return b ^ temp[j]; });
-    }
-    return { w: w, Nr: Nr };
-  }
-
-  function encryptBlock(block, w, Nr) {
-    var s = block.slice();
-    var rk = function (r) { return w.slice(r*4, r*4+4); };
-    function addRoundKey(r) {
-      var k = rk(r);
-      for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] ^= k[c][i];
-    }
-    addRoundKey(0);
-    for (var round = 1; round < Nr; round++) {
-      for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
-      // ShiftRows
-      var t = s.slice();
-      for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] = t[4*((c+i)%4)+i];
-      // MixColumns
-      for (var c = 0; c < 4; c++) {
-        var a0=s[4*c], a1=s[4*c+1], a2=s[4*c+2], a3=s[4*c+3];
-        s[4*c]   = mul(a0,2)^mul(a1,3)^a2^a3;
-        s[4*c+1] = a0^mul(a1,2)^mul(a2,3)^a3;
-        s[4*c+2] = a0^a1^mul(a2,2)^mul(a3,3);
-        s[4*c+3] = mul(a0,3)^a1^a2^mul(a3,2);
-      }
-      addRoundKey(round);
-    }
-    for (var i = 0; i < 16; i++) s[i] = SBOX[s[i]];
-    var t = s.slice();
-    for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] = t[4*((c+i)%4)+i];
-    addRoundKey(Nr);
-    return s;
-  }
-
-  function decryptBlock(block, w, Nr) {
-    var s = block.slice();
-    var rk = function (r) { return w.slice(r*4, r*4+4); };
-    function addRoundKey(r) {
-      var k = rk(r);
-      for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] ^= k[c][i];
-    }
-    addRoundKey(Nr);
-    for (var round = Nr - 1; round >= 1; round--) {
-      var t = s.slice();
-      for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] = t[4*((c-i+4)%4)+i];
-      for (var i = 0; i < 16; i++) s[i] = INV_SBOX[s[i]];
-      addRoundKey(round);
-      for (var c = 0; c < 4; c++) {
-        var a0=s[4*c], a1=s[4*c+1], a2=s[4*c+2], a3=s[4*c+3];
-        s[4*c]   = mul(a0,14)^mul(a1,11)^mul(a2,13)^mul(a3,9);
-        s[4*c+1] = mul(a0,9)^mul(a1,14)^mul(a2,11)^mul(a3,13);
-        s[4*c+2] = mul(a0,13)^mul(a1,9)^mul(a2,14)^mul(a3,11);
-        s[4*c+3] = mul(a0,11)^mul(a1,13)^mul(a2,9)^mul(a3,14);
-      }
-    }
-    var t = s.slice();
-    for (var c = 0; c < 4; c++) for (var i = 0; i < 4; i++) s[4*c+i] = t[4*((c-i+4)%4)+i];
-    for (var i = 0; i < 16; i++) s[i] = INV_SBOX[s[i]];
-    addRoundKey(0);
-    return s;
-  }
-
+function apiHeaders() {
   return {
-    encryptCBC: function (plainBytes, keyBytes, ivBytes) {
-      var expanded = expandKey(keyBytes);
-      var padLen = 16 - (plainBytes.length % 16);
-      var padded = new Uint8Array(plainBytes.length + padLen);
-      padded.set(plainBytes);
-      for (var i = plainBytes.length; i < padded.length; i++) padded[i] = padLen;
-      var out = new Uint8Array(padded.length);
-      var prev = ivBytes;
-      for (var off = 0; off < padded.length; off += 16) {
-        var block = new Array(16);
-        for (var i = 0; i < 16; i++) block[i] = padded[off+i] ^ prev[i];
-        var enc = encryptBlock(block, expanded.w, expanded.Nr);
-        for (var i = 0; i < 16; i++) out[off+i] = enc[i];
-        prev = enc;
-      }
-      return out;
-    },
-    decryptCBC: function (cipherBytes, keyBytes, ivBytes) {
-      var expanded = expandKey(keyBytes);
-      var out = new Uint8Array(cipherBytes.length);
-      var prev = ivBytes;
-      for (var off = 0; off < cipherBytes.length; off += 16) {
-        var block = new Array(16);
-        for (var i = 0; i < 16; i++) block[i] = cipherBytes[off+i];
-        var dec = decryptBlock(block, expanded.w, expanded.Nr);
-        for (var i = 0; i < 16; i++) out[off+i] = dec[i] ^ prev[i];
-        prev = block;
-      }
-      var padLen = out[out.length - 1];
-      if (padLen < 1 || padLen > 16) padLen = 0;
-      return out.slice(0, out.length - padLen);
-    },
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Origin": API_BASE,
+    "Referer": API_BASE + "/",
+    "x-playback-environment": "webkit"
   };
-})();
+}
+
+function streamHeaders() {
+  return {
+    "User-Agent": UA,
+    "Accept": "*/*",
+    "Origin": API_BASE,
+    "Referer": API_BASE + "/",
+    "x-playback-environment": "webkit"
+  };
+}
+
+function fetchText(url, headers) {
+  return fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.text();
+  });
+}
 
 function hexToBytes(hex) {
-  var bytes = [];
-  for (var i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
-  return new Uint8Array(bytes);
-}
-
-function bytesToHex(bytes) {
-  var out = '';
-  for (var i = 0; i < bytes.length; i++) out += ('0' + bytes[i].toString(16)).slice(-2);
-  return out;
-}
-
-function bytesToBase64(bytes) {
-  var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  var out = '';
-  for (var i = 0; i < bytes.length; i += 3) {
-    var b0 = bytes[i], b1 = i+1 < bytes.length ? bytes[i+1] : 0, b2 = i+2 < bytes.length ? bytes[i+2] : 0;
-    out += chars[b0 >> 2];
-    out += chars[((b0 & 3) << 4) | (b1 >> 4)];
-    out += i+1 < bytes.length ? chars[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-    out += i+2 < bytes.length ? chars[b2 & 63] : '=';
-  }
-  return out;
-}
-
-function base64ToBytes(b64) {
-  var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  var lookup = {};
-  for (var i = 0; i < chars.length; i++) lookup[chars[i]] = i;
-  var clean = b64.replace(/[^A-Za-z0-9+/]/g, '');
   var out = [];
-  for (var i = 0; i < clean.length; i += 4) {
-    var c0 = lookup[clean[i]] || 0, c1 = lookup[clean[i+1]] || 0;
-    var c2 = lookup[clean[i+2]], c3 = lookup[clean[i+3]];
-    out.push((c0 << 2) | (c1 >> 4));
-    if (c2 !== undefined) out.push(((c1 & 15) << 4) | (c2 >> 2));
-    if (c3 !== undefined) out.push(((c2 & 3) << 6) | c3);
-  }
-  return new Uint8Array(out);
+  for (var i = 0; i < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
+  return out;
 }
 
-function utf8ToBytes(str) {
+function strToBytes(s) {
   var out = [];
-  for (var i = 0; i < str.length; i++) {
-    var c = str.charCodeAt(i);
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 63)); }
-    else { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63)); }
-  }
-  return new Uint8Array(out);
+  s = String(s);
+  for (var i = 0; i < s.length; i++) out.push(s.charCodeAt(i) & 255);
+  return out;
 }
 
-function bytesToUtf8(bytes) {
-  var out = '';
-  for (var i = 0; i < bytes.length; i++) {
-    var b = bytes[i];
-    if (b < 0x80) out += String.fromCharCode(b);
-    else if (b < 0xe0) out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[++i] & 0x3f));
-    else out += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[++i] & 0x3f) << 6) | (bytes[++i] & 0x3f));
+function bytesToB64Url(bytes) {
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  var out = "";
+  var i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    var n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out += chars.charAt((n >> 18) & 63) + chars.charAt((n >> 12) & 63) + chars.charAt((n >> 6) & 63) + chars.charAt(n & 63);
+  }
+  if (i + 1 === bytes.length) {
+    var a = bytes[i] << 16;
+    out += chars.charAt((a >> 18) & 63) + chars.charAt((a >> 12) & 63);
+  } else if (i + 2 === bytes.length) {
+    var b = (bytes[i] << 16) | (bytes[i + 1] << 8);
+    out += chars.charAt((b >> 18) & 63) + chars.charAt((b >> 12) & 63) + chars.charAt((b >> 6) & 63);
   }
   return out;
 }
 
-function randomBytes(n) {
-  var bytes = new Uint8Array(n);
-  for (var i = 0; i < n; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return bytes;
+/* ---------- XSalsa20-Poly1305 (NaCl secretbox), pure JS ---------- */
+
+function rotl(a, b) {
+  return (a << b) | (a >>> (32 - b));
 }
 
-function encryptId(id) {
-  var key = hexToBytes(KEY_HEX).slice(0, 32);
-  var iv = randomBytes(16);
-  var plain = utf8ToBytes(String(id));
-  var cipher = AES.encryptCBC(plain, key, iv);
-  var payload = bytesToHex(iv) + ':' + bytesToHex(cipher);
-  return bytesToBase64(utf8ToBytes(payload));
+function qr(x, a, b, c, d) {
+  x[b] ^= rotl((x[a] + x[d]) | 0, 7);
+  x[c] ^= rotl((x[b] + x[a]) | 0, 9);
+  x[d] ^= rotl((x[c] + x[b]) | 0, 13);
+  x[a] ^= rotl((x[d] + x[c]) | 0, 18);
 }
 
-function decryptPayload(text) {
-  var decoded = bytesToUtf8(base64ToBytes(text));
-  var parts = decoded.split(':');
-  if (parts.length !== 2) throw new Error('invalid encrypted payload');
-  var iv = hexToBytes(parts[0]);
-  var cipher = hexToBytes(parts[1]);
-  var key = hexToBytes(KEY_HEX).slice(0, 32);
-  var plain = AES.decryptCBC(cipher, key, iv);
-  return bytesToUtf8(plain);
+function le32(b, i) {
+  return (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) | 0;
 }
 
-// ─────────────────────────────── HTTP ─────────────────────────────────
+var SIGMA = [101, 120, 112, 97, 110, 100, 32, 51, 50, 45, 98, 121, 116, 101, 32, 107];
 
-function withTimeout(promise, ms, label) {
-  if (typeof setTimeout !== 'function') return promise;
-  return new Promise(function (resolve, reject) {
-    var timer = setTimeout(function () { reject(new Error('timeout: ' + label)); }, ms);
-    promise.then(
-      function (v) { clearTimeout(timer); resolve(v); },
-      function (e) { clearTimeout(timer); reject(e); }
-    );
+function salsaState(inp, key) {
+  return [
+    le32(SIGMA, 0), le32(key, 0), le32(key, 4), le32(key, 8), le32(key, 12),
+    le32(SIGMA, 4), le32(inp, 0), le32(inp, 4), le32(inp, 8), le32(inp, 12),
+    le32(SIGMA, 8), le32(key, 16), le32(key, 20), le32(key, 24), le32(key, 28),
+    le32(SIGMA, 12)
+  ];
+}
+
+function salsaRounds(x) {
+  for (var i = 0; i < 10; i++) {
+    qr(x, 0, 4, 8, 12); qr(x, 5, 9, 13, 1); qr(x, 10, 14, 2, 6); qr(x, 15, 3, 7, 11);
+    qr(x, 0, 1, 2, 3); qr(x, 5, 6, 7, 4); qr(x, 10, 11, 8, 9); qr(x, 15, 12, 13, 14);
+  }
+}
+
+function words2bytes(words, out) {
+  for (var i = 0; i < words.length; i++) {
+    out.push(words[i] & 255, (words[i] >>> 8) & 255, (words[i] >>> 16) & 255, (words[i] >>> 24) & 255);
+  }
+  return out;
+}
+
+function salsa20Block(inp, key) {
+  var s = salsaState(inp, key);
+  var x = s.slice();
+  salsaRounds(x);
+  for (var i = 0; i < 16; i++) x[i] = (x[i] + s[i]) | 0;
+  return words2bytes(x, []);
+}
+
+function hsalsa20(inp, key) {
+  var x = salsaState(inp, key);
+  salsaRounds(x);
+  return words2bytes([x[0], x[5], x[10], x[15], x[6], x[7], x[8], x[9]], []);
+}
+
+// XOR `data` with the XSalsa20 keystream (24-byte nonce), starting at stream offset `skip`.
+function xsalsa20Xor(data, nonce, key, skip) {
+  var subkey = hsalsa20(nonce.slice(0, 16), key);
+  var out = [];
+  var total = skip + data.length;
+  var block = [];
+  var counter = 0;
+  var produced = 0;
+  while (produced < total) {
+    var inp = nonce.slice(16, 24).concat([counter & 255, (counter >>> 8) & 255, (counter >>> 16) & 255, (counter >>> 24) & 255, 0, 0, 0, 0]);
+    block = salsa20Block(inp, subkey);
+    for (var i = 0; i < 64 && produced < total; i++, produced++) {
+      if (produced >= skip) out.push(data[produced - skip] ^ block[i]);
+    }
+    counter++;
+  }
+  return out;
+}
+
+// Original TweetNaCl Poly1305 (17 limbs of 8 bits).
+function poly1305(m, k) {
+  var h = [], r = [], c = [], x = [], g = [], i, j, u, s;
+  var minusp = [5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 252];
+  for (j = 0; j < 17; j++) { r[j] = 0; h[j] = 0; }
+  for (j = 0; j < 16; j++) r[j] = k[j];
+  r[3] &= 15; r[4] &= 252; r[7] &= 15; r[8] &= 252; r[11] &= 15; r[12] &= 252; r[15] &= 15;
+  function add(hh, cc) {
+    var t = 0;
+    for (var q = 0; q < 17; q++) { t += hh[q] + cc[q]; hh[q] = t & 255; t >>= 8; }
+  }
+  var pos = 0, n = m.length;
+  while (n > 0) {
+    for (j = 0; j < 17; j++) c[j] = 0;
+    for (j = 0; j < 16 && j < n; j++) c[j] = m[pos + j];
+    c[j] = 1;
+    pos += j; n -= j;
+    add(h, c);
+    for (i = 0; i < 17; i++) {
+      x[i] = 0;
+      for (j = 0; j < 17; j++) x[i] += h[j] * (j <= i ? r[i - j] : 320 * r[i + 17 - j]);
+    }
+    for (i = 0; i < 17; i++) h[i] = x[i];
+    u = 0;
+    for (j = 0; j < 16; j++) { u += h[j]; h[j] = u & 255; u >>= 8; }
+    u += h[16]; h[16] = u & 3;
+    u = 5 * (u >> 2);
+    for (j = 0; j < 16; j++) { u += h[j]; h[j] = u & 255; u >>= 8; }
+    u += h[16]; h[16] = u;
+  }
+  for (j = 0; j < 17; j++) g[j] = h[j];
+  add(h, minusp);
+  s = -(h[16] >> 7);
+  for (j = 0; j < 17; j++) h[j] ^= s & (g[j] ^ h[j]);
+  for (j = 0; j < 16; j++) c[j] = k[j + 16];
+  c[16] = 0;
+  add(h, c);
+  return h.slice(0, 16);
+}
+
+// Returns tag(16) || ciphertext, same layout as nacl.secretbox.
+function secretbox(msg, nonce, key) {
+  var zeros = [];
+  for (var i = 0; i < 32; i++) zeros.push(0);
+  var polyKey = xsalsa20Xor(zeros, nonce, key, 0);
+  var ct = xsalsa20Xor(msg, nonce, key, 32);
+  return poly1305(ct, polyKey).concat(ct);
+}
+
+function makeToken(mediaId, nowSec) {
+  var ts = nowSec + TOKEN_TTL;
+  var tsBytes = [];
+  var hi = Math.floor(ts / 4294967296);
+  var lo = ts >>> 0;
+  tsBytes.push((hi >>> 24) & 255, (hi >>> 16) & 255, (hi >>> 8) & 255, hi & 255, (lo >>> 24) & 255, (lo >>> 16) & 255, (lo >>> 8) & 255, lo & 255);
+  var msg = strToBytes(mediaId).concat(tsBytes);
+  var nonce = new Array(24);
+  for (var i = 0; i < 24; i++) nonce[i] = 0;
+  var box = secretbox(msg, nonce, hexToBytes(KEY_HEX));
+  return bytesToB64Url(nonce.concat(box));
+}
+
+/* ---------- API ---------- */
+
+function apiPath(tokenOrId, mediaType, season, episode) {
+  if (mediaType === "tv") return "/api/b/tv/" + tokenOrId + "/" + (Number(season) || 1) + "/" + (Number(episode) || 1) + "?multiLang=1";
+  return "/api/b/movie/" + tokenOrId + "?multiLang=1";
+}
+
+function relayToken(tmdbId) {
+  return fetchText(ENC_RELAY + encodeURIComponent(tmdbId), { "User-Agent": UA, "Accept": "application/json" }).then(function(text) {
+    var t = String(text || "").trim();
+    try {
+      var j = JSON.parse(t);
+      if (j && typeof j === "object") t = j.result || j.data || j.token || j.encrypted || "";
+      else if (typeof j === "string") t = j;
+    } catch (e) {}
+    if (!t || typeof t !== "string") throw new Error("relay returned no token");
+    return t;
   });
 }
 
-function httpGet(url, headers) {
-  return withTimeout(
-    fetch(url, { method: 'GET', headers: headers, redirect: 'follow' }),
-    REQUEST_TIMEOUT,
-    url
-  ).then(function (res) {
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + url);
-    return res.text();
+function callApi(token, mediaType, season, episode) {
+  var url = API_BASE + apiPath(token, mediaType, season, episode);
+  console.log("[VidLink] API:", url.slice(0, 80) + "...");
+  return fetchText(url, apiHeaders()).then(function(text) {
+    var body = String(text || "").trim();
+    if (!body || body === "null") return null;
+    return JSON.parse(body);
   });
 }
 
-// ────────────────────────────── Parsing ───────────────────────────────
+function fetchSources(tmdbId, mediaType, season, episode) {
+  var local = null;
+  try { local = makeToken(String(tmdbId), Math.floor(Date.now() / 1000)); } catch (e) { console.log("[VidLink] token error:", e.message); }
+  var first = local ? callApi(local, mediaType, season, episode).catch(function(err) {
+    console.log("[VidLink] local token call failed:", err.message);
+    return undefined;
+  }) : Promise.resolve(undefined);
 
-function parsePlaylist(data, title) {
-  var stream = data && data.stream;
-  if (!stream || !stream.playlist) return null;
+  return first.then(function(data) {
+    if (data) return data;
+    console.log("[VidLink] retrying with enc-dec relay token");
+    return relayToken(String(tmdbId)).then(function(tok) {
+      return callApi(tok, mediaType, season, episode);
+    }).catch(function(err) {
+      console.log("[VidLink] relay path failed:", err.message);
+      return null;
+    });
+  });
+}
+
+/* ---------- response parsing (shape tolerant) ---------- */
+
+var SKIP_PATH = /caption|subtitle|thumb|poster|image|sprite|track/i;
+var MEDIA_KEYS = /^(playlist|file|url|src|source|hls|mp4|dash|stream|link|manifest)$/i;
+
+function looksMedia(url, key, path) {
+  if (!/^https?:\/\//i.test(url)) return false;
+  if (SKIP_PATH.test(path)) return false;
+  if (/\.(vtt|srt|ass|ssa|jpe?g|png|webp|gif|svg|ico)(\?|$)/i.test(url)) return false;
+  if (/\.(m3u8|mp4|mpd|mkv|webm)(\?|$)/i.test(url)) return true;
+  return MEDIA_KEYS.test(key);
+}
+
+function collectMedia(node, key, path, ctx, out, depth) {
+  if (depth > 8 || node === null || node === undefined) return;
+  if (typeof node === "string") {
+    if (looksMedia(node, key, path)) out.push({ url: node, key: key, ctx: ctx, path: path });
+    return;
+  }
+  if (typeof node !== "object") return;
+  var isArr = Object.prototype.toString.call(node) === "[object Array]";
+  var next = ctx;
+  if (!isArr) {
+    next = { source: ctx.source, lang: ctx.lang, quality: ctx.quality };
+    ["sourceId", "source", "server", "name", "provider"].forEach(function(k) { if (typeof node[k] === "string" && node[k]) next.source = node[k]; });
+    ["language", "lang", "label"].forEach(function(k) { if (typeof node[k] === "string" && node[k] && node[k].length < 30) next.lang = node[k]; });
+    ["quality", "resolution", "height"].forEach(function(k) { if ((typeof node[k] === "string" || typeof node[k] === "number") && node[k]) next.quality = String(node[k]); });
+  }
+  var keys = isArr ? node.map(function(_, i) { return i; }) : Object.keys(node);
+  keys.forEach(function(k) {
+    collectMedia(node[k], String(k), path + "/" + k, next, out, depth + 1);
+  });
+}
+
+function qualityFromText(s) {
+  var m = String(s || "").match(/(2160|1440|1080|720|480|360)/);
+  if (m) return m[1] + "p";
+  if (/4k/i.test(s)) return "4K";
+  return "";
+}
+
+function qualityFromMaster(text) {
+  var maxW = 0, maxH = 0, m;
+  var re = /RESOLUTION=(\d+)x(\d+)/gi;
+  while ((m = re.exec(text)) !== null) {
+    var w = parseInt(m[1], 10), h = parseInt(m[2], 10);
+    if (w > maxW) { maxW = w; maxH = h; }
+  }
+  if (!maxW) return "";
+  if (maxW >= 3600 || maxH >= 2000) return "4K";
+  if (maxW >= 1800 || maxH >= 1000) return "1080p";
+  if (maxW >= 1200 || maxH >= 650) return "720p";
+  if (maxW >= 800 || maxH >= 450) return "480p";
+  return "360p";
+}
+
+function makeStream(item, kind, quality, verified) {
+  var parts = ["🔗 VidLink"];
+  if (item.ctx.source) parts.push(item.ctx.source);
+  if (item.ctx.lang) parts.push(item.ctx.lang);
+  if (quality) parts.push(quality);
+  if (!verified) parts.push("unverified");
+  var h = streamHeaders();
   return {
-    name: PROVIDER_NAME,
-    title: title,
-    url: stream.playlist,
-    quality: 'Auto',
-    size: 'Unknown',
-    headers: WORKING_HEADERS,
-    provider: PROVIDER_ID,
+    name: "🔗 VidLink",
+    title: parts.join(" \u2022 "),
+    url: item.url,
+    quality: quality || "Auto",
+    referer: h["Referer"],
+    headers: h,
+    _kind: kind,
+    _verified: verified
   };
 }
 
-function buildTitle(tmdbId, mediaType, season, episode) {
-  if (mediaType === 'tv' || mediaType === 'series') {
-    return 'TMDB ' + tmdbId + ' S' + String(season).padStart(2, '0') + 'E' + String(episode).padStart(2, '0');
-  }
-  return 'TMDB ' + tmdbId;
-}
-
-// ───────────────────────────── Entry point ────────────────────────────
-
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-  var type = (mediaType === 'tv' || mediaType === 'series') ? 'tv' : 'movie';
-  var season = parseInt(seasonNum, 10) || 1;
-  var episode = parseInt(episodeNum, 10) || 1;
-  var title = buildTitle(tmdbId, type, season, episode);
-
-  return new Promise(function (resolve) {
-    var encodedId;
-    try {
-      encodedId = encryptId(tmdbId);
-    } catch (e) {
-      log('encrypt failed: ' + e.message);
-      return resolve([]);
-    }
-
-    var url;
-    if (type === 'tv') {
-      url = API_URL + '/tv/' + encodedId + '/' + season + '/' + episode;
-    } else {
-      url = API_URL + '/movie/' + encodedId;
-    }
-
-    log('requesting ' + url);
-
-    httpGet(url, WORKING_HEADERS)
-      .then(function (encryptedText) {
-        var decrypted;
-        try {
-          decrypted = decryptPayload(encryptedText);
-        } catch (e) {
-          log('decrypt failed: ' + e.message);
-          return resolve([]);
-        }
-        var data;
-        try {
-          data = JSON.parse(decrypted);
-        } catch (e) {
-          log('json parse failed: ' + e.message);
-          return resolve([]);
-        }
-        var stream = parsePlaylist(data, title);
-        if (!stream) {
-          log('no playlist in response');
-          return resolve([]);
-        }
-        log('stream: ' + stream.url.slice(0, 80) + '...');
-        resolve([stream]);
-      })
-      .catch(function (err) {
-        log('error: ' + (err && err.message));
-        resolve([]);
-      });
+function resolveItem(item) {
+  var url = item.url;
+  var hint = qualityFromText(item.ctx.quality) || qualityFromText(url) || qualityFromText(item.path);
+  if (/\.mp4(\?|$)/i.test(url) || /\.(mkv|webm)(\?|$)/i.test(url)) return Promise.resolve([makeStream(item, "mp4", hint, true)]);
+  if (/\.mpd(\?|$)/i.test(url)) return Promise.resolve([makeStream(item, "dash", hint, true)]);
+  return fetchText(url, streamHeaders()).then(function(text) {
+    var body = String(text || "").replace(/^\s+/, "");
+    if (body.indexOf("#EXTM3U") === 0) return [makeStream(item, "hls", qualityFromMaster(body) || hint, true)];
+    if (/^<\?xml|^<MPD/i.test(body)) return [makeStream(item, "dash", hint, true)];
+    console.log("[VidLink] unexpected playlist body, keeping unverified");
+    return [makeStream(item, "unknown", hint, false)];
+  }).catch(function(err) {
+    console.log("[VidLink] playlist check failed:", err.message, "- keeping unverified");
+    return [makeStream(item, "unknown", hint, false)];
   });
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams: getStreams };
-} else {
-  global.getStreams = getStreams;
-        }
+function getStreams(tmdbId, mediaType, season, episode) {
+  console.log("[VidLink] getStreams:", tmdbId, mediaType, season, episode);
+  return fetchSources(tmdbId, mediaType, season, episode).then(function(data) {
+    if (!data || typeof data !== "object") {
+      console.log("[VidLink] no sources for this title (empty/null response)");
+      return [];
+    }
+    console.log("[VidLink] response keys:", Object.keys(data).join(","));
+    var found = [];
+    collectMedia(data, "", "", { source: "", lang: "", quality: "" }, found, 0);
+    var seen = {};
+    found = found.filter(function(f) { if (seen[f.url]) return false; seen[f.url] = 1; return true; });
+    console.log("[VidLink] media urls found:", found.length);
+    if (!found.length) {
+      console.log("[VidLink] response sample:", JSON.stringify(data).slice(0, 400));
+      return [];
+    }
+    return Promise.all(found.map(function(item) {
+      return withTimeout(resolveItem(item), CHECK_TIMEOUT, [makeStream(item, "unknown", "", false)]);
+    })).then(function(groups) {
+      var ok = [], rest = [];
+      groups.forEach(function(g) {
+        g.forEach(function(s) {
+          var v = s._verified;
+          delete s._kind;
+          delete s._verified;
+          (v ? ok : rest).push(s);
+        });
+      });
+      var all = ok.concat(rest);
+      console.log("[VidLink] streams:", all.length, "(verified:", ok.length + ")");
+      return all;
+    });
+  }).catch(function(err) {
+    console.log("[VidLink] error:", err.message);
+    return [];
+  });
+}
+
+module.exports = {
+  getStreams: getStreams
+};
