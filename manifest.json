@@ -17,15 +17,15 @@
       "supportsExternalPlayer": true
     },
     {
-  "id": "ridomovies",
-  "name": "RidoMovies",
-  "description": "Movies and TV series from RidoMovies",
+  "id": "himovies",
+  "name": "HiMovies",
+  "description": "Movies and TV series from HiMovies",
   "version": "1.0.0",
   "author": "vanseleem",
   "supportedTypes": ["movie", "tv"],
-  "filename": "providers/ridomovies.js",
+  "filename": "providers/himovies.js",
   "enabled": true,
-  "formats": ["m3u8", "mp4"],
+  "formats": ["iframe", "m3u8"],
   "contentLanguage": ["en"],
   "limited": false,
   "supportsExternalPlayer": true
