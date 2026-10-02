@@ -1,21 +1,26 @@
 /**
- * RidoMovies provider
+ * RidoMovies provider  (v2 — corrected from Streamflix source)
  *
- * Architecture (verified):
- *  - Search: /?s={query} → server-rendered HTML with /movies/ and /tv/ links
- *  - Movie page: /movies/{slug}-watch-online-{year}-rd{n}
- *  - TV page: /tv/{slug}-rd{n}
- *  - Player: AJAX POST to /api/player-url with data-player-token
- *  - Closeload embed: ROT13 → Base64 → Reverse decoding → m3u8
+ * REAL API (verified from stantanasi/streamflix RidomoviesProvider.kt):
+ *  - Search:       GET /core/api/search?q={query}
+ *  - Movie videos: GET /core/api/movies/{slug}/videos
+ *  - TV seasons:   GET /core/api/series/{slug}/seasons
+ *  - Episodes:     GET /core/api/series/{slug}/seasons/{seasonId}/episodes
+ *  - Ep videos:    GET /core/api/episodes/{id}/videos
  *
- * Stream hosts: closeload.top / ridorapid.closeload.top
+ * The `url` field in video responses contains HTML: <iframe data-src="...">
+ * The `data-src` is the embed URL (closeload.top / ridorapid.closeload.top).
+ *
+ * My previous version guessed /api/player-url + data-player-token — both wrong.
  */
 
 var BASE = "https://ridomovies.tv";
+var PROVIDER_ID = "ridomovies";
+var PROVIDER_NAME = "🎬 RidoMovies";
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Mobile Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
+var MATCH_THRESHOLD = 0.35;
 var FETCH_TIMEOUT_MS = 15000;
-var MATCH_THRESHOLD = 0.4;
 
 function log(m) { console.log("[RidoMovies] " + m); }
 
@@ -52,20 +57,17 @@ function fetchText(url, referer) {
   );
 }
 
-function fetchJson(url, body, referer) {
+function fetchJson(url, referer) {
   var headers = {
     "User-Agent": UA,
-    "Accept": "application/json, text/plain, */*",
-    "Content-Type": "application/json",
-    "X-Requested-With": "XMLHttpRequest"
+    "Accept": "application/json, text/plain, */*"
   };
   if (referer) headers["Referer"] = referer;
   return withTimeout(
-    fetch(url, {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify(body)
-    }).then(function(r) { return r.json(); }),
+    fetch(url, { headers: headers, redirect: "follow" }).then(function(r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }),
     FETCH_TIMEOUT_MS
   );
 }
@@ -78,10 +80,6 @@ function decodeHtml(str) {
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
-}
-
-function stripHtml(str) {
-  return decodeHtml(String(str || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 }
 
 function normalizeTitle(str) {
@@ -116,17 +114,6 @@ function hostOf(url) {
   return m ? m[1].replace(/^www\./, "") : "";
 }
 
-function getAttr(attrs, name) {
-  var re = new RegExp("(?:^|[\\s\"'])" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
-  var m = String(attrs || "").match(re);
-  if (!m) return "";
-  return decodeHtml(m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]));
-}
-
-function snippet(text) {
-  return String(text || "").replace(/\s+/g, " ").slice(0, 200);
-}
-
 // ---------------------------------------------------------------- TMDB
 function getTmdbTitles(tmdbId, mediaType) {
   var type = mediaType === "tv" ? "tv" : "movie";
@@ -153,59 +140,38 @@ function getTmdbTitles(tmdbId, mediaType) {
   });
 }
 
-// ---------------------------------------------------------------- search
-function parseListing(html) {
-  var out = []; var seen = {};
-  var re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  var m;
-  html = String(html || "");
-  while ((m = re.exec(html)) !== null) {
-    var href = getAttr(m[1], "href");
-    var hm = href.match(/\/(movies|tv)\/([^"?#]+)/i);
-    if (!hm) continue;
-    var kind = hm[1].toLowerCase() === "movies" ? "movie" : "series";
-    var slug = hm[2];
-    var key = kind + slug;
-
-    var title = getAttr(m[1], "title") || "";
-    if (!title) {
-      var alt = m[2].match(/<img\b[^>]*\balt\s*=\s*["']([^"']+)["']/i);
-      if (alt) title = alt[1];
-    }
-    if (!title) title = stripHtml(m[2]);
-    title = title.replace(/\s*[-–]\s*watch online.*$/i, "").replace(/\s+rd\d+$/i, "").trim();
-    if (!title || title.length < 2) continue;
-
-    if (seen[key] !== undefined) continue;
-    seen[key] = out.length;
-    out.push({ slug: slug, kind: kind, url: BASE + "/" + hm[1] + "/" + slug, title: title });
-  }
-  return out;
-}
-
-function searchRidoMovies(title) {
-  var q = String(title || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
-  var url = BASE + "/?s=" + encodeURIComponent(q);
+// ---------------------------------------------------------------- search API
+// GET /core/api/search?q={query}
+// Response: { code, message, data: { items: [{ slug, title, type, ... }] } }
+function searchRidoMovies(query) {
+  var q = String(query || "").replace(/[:\u060C-\u061F]/g, " ").replace(/\s+/g, " ").trim();
+  var url = BASE + "/core/api/search?q=" + encodeURIComponent(q);
   log("Search: " + q);
-  return fetchText(url, BASE + "/").then(function(html) {
-    var results = parseListing(html);
-    log("Search results: " + results.length + " (html " + html.length + "b)");
-    if (!results.length) log("Search page starts with: " + snippet(html));
-    return results;
+  return fetchJson(url, BASE + "/").then(function(res) {
+    var items = (res && res.data && res.data.items) || [];
+    log("Search results: " + items.length);
+    return items.map(function(it) {
+      return {
+        slug: it.slug || it.fullSlug,
+        title: it.title || (it.contentable && it.contentable.originalTitle) || "",
+        type: it.type || "",
+        year: (it.contentable && it.contentable.releaseYear) || ""
+      };
+    }).filter(function(x) { return x.slug && x.title; });
+  }).catch(function(e) {
+    log("Search failed: " + e.message);
+    return [];
   });
 }
 
 function searchMany(titles) {
   return Promise.all(titles.map(function(t) {
-    return searchRidoMovies(t).catch(function(e) {
-      log("search failed: " + e.message);
-      return [];
-    });
+    return searchRidoMovies(t);
   })).then(function(groups) {
     var all = []; var seen = {};
     groups.forEach(function(g) {
       g.forEach(function(r) {
-        var k = r.kind + r.slug;
+        var k = r.slug;
         if (!seen[k]) { seen[k] = 1; all.push(r); }
       });
     });
@@ -214,10 +180,9 @@ function searchMany(titles) {
   });
 }
 
-function chooseResult(results, titles, wantKind) {
+function chooseResult(results, titles) {
   var best = null; var bestScore = 0;
   results.forEach(function(r) {
-    if (wantKind && r.kind !== wantKind) return;
     var s = 0;
     titles.forEach(function(t) {
       var sc = similarity(r.title, t);
@@ -225,83 +190,121 @@ function chooseResult(results, titles, wantKind) {
     });
     if (s > bestScore) { bestScore = s; best = r; }
   });
-  if (best) log("Best: " + best.title + " (" + best.kind + ") score=" + bestScore.toFixed(3));
+  if (best) log("Best: " + best.title + " (" + best.slug + ") score=" + bestScore.toFixed(3));
   return bestScore >= MATCH_THRESHOLD ? best : null;
 }
 
-// ---------------------------------------------------------------- player resolution
-// RidoMovies uses an AJAX endpoint: POST /api/player-url with { t: token }
-// The token comes from the data-player-token attribute on the movie page.
-
-function extractPlayerToken(html) {
-  // Look for data-player-token="..." or data-player-token='...'
-  var m = html.match(/data-player-token\s*=\s*["']([^"']+)["']/i);
-  if (m) return m[1];
-  // Look for player token in JSON config
-  m = html.match(/["']playerToken["']\s*:\s*["']([^"']+)["']/i);
-  if (m) return m[1];
-  // Look for any data-* attribute with a token-like value
-  m = html.match(/data-[a-z-]*token\s*=\s*["']([A-Za-z0-9+\/=_-]{20,})["']/i);
+// ---------------------------------------------------------------- video API
+// GET /core/api/movies/{slug}/videos
+// Response: { data: [{ id, link, lang, quality, url }] }
+//   url = HTML string like: <iframe data-src="https://closeload.top/..."></iframe>
+function extractIframeSrc(html) {
+  var s = String(html || "");
+  // Primary: data-src (what Streamflix uses)
+  var m = s.match(/<iframe[^>]*\sdata-src\s*=\s*["']([^"']+)["']/i);
+  if (m) return decodeHtml(m[1]);
+  // Fallback: src
+  m = s.match(/<iframe[^>]*\ssrc\s*=\s*["']([^"']+)["']/i);
+  if (m) return decodeHtml(m[1]);
+  // Fallback: any https URL in the string
+  m = s.match(/(https?:\/\/[^"'\s<>]+)/i);
   if (m) return m[1];
   return null;
 }
 
-function extractModelAndId(html) {
-  // Look for data-model="movie" data-id="12345"
-  var model = null, id = null;
-  var mm = html.match(/data-model\s*=\s*["']([^"']+)["']/i);
-  if (mm) model = mm[1];
-  var im = html.match(/data-id\s*=\s*["']([^"']+)["']/i);
-  if (im) id = im[1];
-  // Alternative: look for /api/player-url/movie/12345 pattern
-  var pm = html.match(/\/api\/player-url\/([a-z]+)\/([0-9]+)/i);
-  if (pm) { model = pm[1]; id = pm[2]; }
-  return { model: model, id: id };
-}
-
-function resolvePlayerUrl(moviePageUrl) {
-  return fetchText(moviePageUrl, BASE + "/").then(function(html) {
-    var token = extractPlayerToken(html);
-    var ctx = extractModelAndId(html);
-    log("Player token: " + (token ? "found (" + token.slice(0, 16) + "...)" : "NOT FOUND"));
-    log("Model/ID: " + (ctx.model || "?") + "/" + (ctx.id || "?"));
-
-    // If no token, try to find the player iframe directly
-    if (!token) {
-      var iframeMatch = html.match(/<iframe[^>]+src\s*=\s*["']([^"']+)["']/i);
-      if (iframeMatch) {
-        var u = iframeMatch[1];
-        if (u.indexOf("//") === 0) u = "https:" + u;
-        if (u.indexOf("http") === 0) return { direct: [u] };
-      }
-      return { direct: [] };
-    }
-
-    // POST to /api/player-url with token
-    var apiUrl = BASE + "/api/player-url";
-    return fetchJson(apiUrl, { t: token }, moviePageUrl).then(function(res) {
-      log("Player API response: " + JSON.stringify(res).slice(0, 300));
-
-      // Parse the response for iframe URLs
-      var urls = [];
-      if (res && res.url) urls.push(res.url);
-      if (res && res.iframe) urls.push(res.iframe);
-      if (res && res.data && res.data.url) urls.push(res.data.url);
-      if (res && res.html) {
-        var im = res.html.match(/src\s*=\s*["']([^"']+)["']/i);
-        if (im) urls.push(im[1]);
-      }
-      return { direct: urls, raw: res };
-    }).catch(function(e) {
-      log("Player API failed: " + e.message);
-      return { direct: [] };
+function getMovieVideos(slug) {
+  var url = BASE + "/core/api/movies/" + encodeURIComponent(slug) + "/videos";
+  log("Movie videos API: " + url);
+  return fetchJson(url, BASE + "/movies/" + slug).then(function(res) {
+    var videos = (res && res.data) || [];
+    log("Video entries: " + videos.length);
+    var servers = [];
+    videos.forEach(function(v) {
+      var src = extractIframeSrc(v.url);
+      if (!src) return;
+      if (src.indexOf("//") === 0) src = "https:" + src;
+      if (src.indexOf("http") !== 0) return;
+      servers.push({
+        id: v.id,
+        quality: v.quality || "Auto",
+        lang: v.lang || "",
+        url: src,
+        host: hostOf(src)
+      });
     });
+    log("Extracted servers: " + servers.length + " [" + servers.map(function(s) { return s.host + "/" + s.quality; }).join(", ") + "]");
+    return servers;
+  }).catch(function(e) {
+    log("Movie videos failed: " + e.message);
+    return [];
   });
 }
 
-// ---------------------------------------------------------------- Closeload extractor
-// Streamflix uses: ROT13 → Base64 → Reverse (in some order)
-// The "Smart Brute Force" tries all permutations.
+function getEpisodeVideos(episodeId) {
+  var url = BASE + "/core/api/episodes/" + encodeURIComponent(episodeId) + "/videos";
+  log("Episode videos API: " + url);
+  return fetchJson(url, BASE + "/").then(function(res) {
+    var videos = (res && res.data) || [];
+    var servers = [];
+    videos.forEach(function(v) {
+      var src = extractIframeSrc(v.url);
+      if (!src) return;
+      if (src.indexOf("//") === 0) src = "https:" + src;
+      if (src.indexOf("http") !== 0) return;
+      servers.push({
+        id: v.id,
+        quality: v.quality || "Auto",
+        lang: v.lang || "",
+        url: src,
+        host: hostOf(src)
+      });
+    });
+    log("Episode servers: " + servers.length);
+    return servers;
+  }).catch(function(e) {
+    log("Episode videos failed: " + e.message);
+    return [];
+  });
+}
+
+// TV: get seasons, then find the episode, then get its videos
+function getTvServers(slug, season, episode) {
+  var seasonsUrl = BASE + "/core/api/series/" + encodeURIComponent(slug) + "/seasons";
+  log("Seasons API: " + seasonsUrl);
+  return fetchJson(seasonsUrl, BASE + "/tv/" + slug).then(function(res) {
+    var seasons = (res && res.data && res.data.items) || [];
+    log("Seasons: " + seasons.length);
+    var target = seasons.filter(function(s) {
+      return String(s.seasonNumber) === String(season);
+    })[0];
+    if (!target) {
+      log("Season " + season + " not found");
+      return [];
+    }
+    var epsUrl = BASE + "/core/api/series/" + encodeURIComponent(slug) +
+      "/seasons/" + encodeURIComponent(target.id) + "/episodes";
+    log("Episodes API: " + epsUrl);
+    return fetchJson(epsUrl, BASE + "/tv/" + slug).then(function(epsRes) {
+      var episodes = (epsRes && epsRes.data && epsRes.data.items) || [];
+      log("Episodes: " + episodes.length);
+      var targetEp = episodes.filter(function(e) {
+        return String(e.episodeNumber) === String(episode);
+      })[0];
+      if (!targetEp) {
+        log("Episode " + episode + " not found");
+        return [];
+      }
+      return getEpisodeVideos(targetEp.id);
+    });
+  }).catch(function(e) {
+    log("TV API failed: " + e.message);
+    return [];
+  });
+}
+
+// ---------------------------------------------------------------- closeload extractor
+// Streamflix uses ROT13 -> Base64 -> Reverse (Smart Brute Force).
+// We try all permutations of those transforms.
 
 function rot13(s) {
   return String(s).replace(/[a-zA-Z]/g, function(c) {
@@ -323,8 +326,6 @@ function reverse(s) {
 }
 
 function smartDecode(input) {
-  // Try all permutations of ROT13, Base64, Reverse (up to 3 layers each)
-  var candidates = [input];
   var transforms = [
     { name: "rot13", fn: rot13 },
     { name: "b64", fn: b64decode },
@@ -332,35 +333,39 @@ function smartDecode(input) {
   ];
   var seen = {};
   seen[input] = 1;
-  var results = [];
+  var candidates = [input];
+  var urls = [];
 
   for (var depth = 0; depth < 4; depth++) {
     var next = [];
-    candidates.forEach(function(c) {
-      transforms.forEach(function(t) {
-        var out = t.fn(c);
-        if (!out || out === c || out.length < 8) return;
-        if (seen[out]) return;
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var c = candidates[ci];
+      for (var ti = 0; ti < transforms.length; ti++) {
+        var t = transforms[ti];
+        var out;
+        try { out = t.fn(c); } catch (e) { continue; }
+        if (!out || out === c || out.length < 8) continue;
+        if (seen[out]) continue;
         seen[out] = 1;
         next.push(out);
-        if (/\.m3u8|\.mp4|https?:\/\//i.test(out)) {
-          results.push({ text: out, path: t.name });
+        // Extract any URLs
+        var re = /https?:\/\/[^"'\s<>\\]+/gi;
+        var m;
+        while ((m = re.exec(out)) !== null) {
+          if (urls.indexOf(m[0]) === -1) urls.push(m[0]);
         }
-      });
-    });
-    candidates = next;
-    if (results.length) break;
-  }
-
-  // Extract any URLs from results
-  var urls = [];
-  results.forEach(function(r) {
-    var re = /https?:\/\/[^"'\s<>\\]+/gi;
-    var m;
-    while ((m = re.exec(r.text)) !== null) {
-      if (urls.indexOf(m[0]) === -1) urls.push(m[0]);
+        // Also check for direct m3u8/mp4 markers
+        if (/\.m3u8|\.mp4/i.test(out)) {
+          var re2 = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
+          while ((m = re2.exec(out)) !== null) {
+            if (urls.indexOf(m[0]) === -1) urls.push(m[0]);
+          }
+        }
+      }
     }
-  });
+    candidates = next;
+    if (urls.length) break;
+  }
   return urls;
 }
 
@@ -369,30 +374,27 @@ function extractCloseload(embedUrl, referer) {
   return fetchText(embedUrl, referer).then(function(html) {
     var urls = [];
 
-    // Direct m3u8/mp4 in the page
+    // Direct m3u8/mp4 in page
     var re = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
     var m;
     while ((m = re.exec(html)) !== null) urls.push(m[0]);
 
-    // Look for encoded strings that need decoding
-    if (!urls.length) {
-      var encoded = [];
-      var reEnc = /["']([A-Za-z0-9+\/=_-]{30,})["']/g;
-      while ((m = reEnc.exec(html)) !== null) encoded.push(m[1]);
-
-      encoded.forEach(function(e) {
-        smartDecode(e).forEach(function(u) {
-          if (urls.indexOf(u) === -1) urls.push(u);
-        });
-      });
-    }
-
-    // Look for packed eval
+    // Packed eval
     if (!urls.length) {
       var unpacked = unpackAll(html);
       if (unpacked) {
         var re2 = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
         while ((m = re2.exec(unpacked)) !== null) urls.push(m[0]);
+      }
+    }
+
+    // Encoded strings
+    if (!urls.length) {
+      var reEnc = /["']([A-Za-z0-9+\/=_-]{30,})["']/g;
+      while ((m = reEnc.exec(html)) !== null) {
+        smartDecode(m[1]).forEach(function(u) {
+          if (urls.indexOf(u) === -1) urls.push(u);
+        });
       }
     }
 
@@ -438,7 +440,7 @@ function unpackAll(html) {
 }
 
 // ---------------------------------------------------------------- build streams
-function qualityFromUrl(url) {
+function qualityFromUrl(url, fallback) {
   var s = String(url).toLowerCase();
   if (/2160|4k/.test(s)) return "2160p";
   if (/1440/.test(s)) return "1440p";
@@ -446,7 +448,7 @@ function qualityFromUrl(url) {
   if (/720/.test(s)) return "720p";
   if (/480/.test(s)) return "480p";
   if (/360/.test(s)) return "360p";
-  return "Auto";
+  return fallback || "Auto";
 }
 
 function serverLabelFromUrl(url) {
@@ -459,89 +461,77 @@ function serverLabelFromUrl(url) {
   return h.split(".").slice(-2, -1)[0] || h;
 }
 
-function buildStreams(urls, pageUrl, label) {
-  var out = [];
-  var seen = {};
-  urls.forEach(function(url) {
-    if (seen[url]) return;
-    seen[url] = 1;
-    if (url.indexOf("http://") === 0) url = "https://" + url.slice(7);
-    var isHls = /\.m3u8/i.test(url);
-    var host = serverLabelFromUrl(url);
-    var referer = originOf(pageUrl) + "/";
-    out.push({
-      name: "🎬 RidoMovies " + label + " (" + host + ")",
-      title: "🎬 RidoMovies • " + label + " (" + host + ")",
-      url: url,
-      quality: isHls ? "Auto" : qualityFromUrl(url),
-      size: "Unknown",
-      type: isHls ? "hls" : "mp4",
-      headers: {
-        "User-Agent": UA,
-        "Referer": referer,
-        "Origin": originOf(pageUrl),
-        "Accept": "*/*"
-      },
-      provider: "ridomovies"
+function buildStreams(servers, pageUrl, tag) {
+  // servers: [{ url, quality, lang, host }]
+  // Each server is an iframe URL from the API. Try to resolve to direct m3u8.
+  return Promise.all(servers.map(function(srv) {
+    return extractCloseload(srv.url, pageUrl).then(function(directUrls) {
+      var items = [];
+      if (directUrls.length) {
+        directUrls.forEach(function(u) {
+          items.push({
+            url: u,
+            quality: qualityFromUrl(u, srv.quality),
+            label: serverLabelFromUrl(u) + " " + (srv.quality || ""),
+            direct: true
+          });
+        });
+      } else {
+        // Fallback: return the iframe URL
+        items.push({
+          url: srv.url,
+          quality: srv.quality || "Auto",
+          label: serverLabelFromUrl(srv.url) + " (iframe)",
+          direct: false
+        });
+      }
+      return items;
     });
+  })).then(function(groups) {
+    var out = []; var seen = {};
+    groups.forEach(function(g) {
+      g.forEach(function(it) {
+        if (seen[it.url]) return;
+        seen[it.url] = 1;
+        var isHls = /\.m3u8/i.test(it.url);
+        var origin = originOf(pageUrl);
+        out.push({
+          name: PROVIDER_NAME + " " + (tag ? tag + " " : "") + it.label,
+          title: PROVIDER_NAME + " • " + (tag ? tag + " " : "") + it.label,
+          url: it.url,
+          quality: it.quality,
+          size: "Unknown",
+          type: it.direct ? (isHls ? "hls" : "mp4") : "iframe",
+          headers: {
+            "User-Agent": UA,
+            "Referer": it.direct ? (originOf(it.url) + "/") : pageUrl,
+            "Origin": originOf(it.url) || origin,
+            "Accept": "*/*"
+          },
+          provider: PROVIDER_ID
+        });
+      });
+    });
+    // Direct streams first
+    out.sort(function(a, b) {
+      return (a.type === "iframe" ? 1 : 0) - (b.type === "iframe" ? 1 : 0);
+    });
+    log("Total streams: " + out.length + " (direct: " + out.filter(function(s) { return s.type !== "iframe"; }).length + ")");
+    return out;
   });
-  log("Streams: " + out.length);
-  return out;
 }
 
 // ---------------------------------------------------------------- movie flow
 function getMovieStreams(tmdbId) {
   return getTmdbTitles(tmdbId, "movie").then(function(meta) {
     return searchMany(meta.titles).then(function(all) {
-      var best = chooseResult(all, meta.titles, "movie");
+      var best = chooseResult(all, meta.titles);
       if (!best) return [];
-      log("Resolving: " + best.url);
-
-      return fetchText(best.url, BASE + "/").then(function(html) {
-        // Try to get player URL via AJAX
-        return resolvePlayerUrl(best.url).then(function(playerRes) {
-          var allUrls = [];
-
-          // If player API returned URLs directly
-          if (playerRes.direct && playerRes.direct.length) {
-            playerRes.direct.forEach(function(u) {
-              if (/closeload|ridorapid/i.test(u)) {
-                return; // will be handled below
-              }
-              allUrls.push(u);
-            });
-          }
-
-          // Resolve Closeload embeds
-          var closeloadEmbeds = [];
-          var re = /(https?:\/\/(?:[\w.-]+\.)?closeload\.top[^"'\s<>]*)/gi;
-          var m;
-          var combined = html + " " + JSON.stringify(playerRes.raw || "");
-          while ((m = re.exec(combined)) !== null) {
-            if (closeloadEmbeds.indexOf(m[1]) === -1) closeloadEmbeds.push(m[1]);
-          }
-
-          if (!closeloadEmbeds.length && playerRes.direct) {
-            playerRes.direct.forEach(function(u) {
-              if (/closeload|ridorapid/i.test(u)) closeloadEmbeds.push(u);
-            });
-          }
-
-          log("Closeload embeds: " + closeloadEmbeds.length);
-          return Promise.all(closeloadEmbeds.map(function(embed) {
-            return extractCloseload(embed, best.url).then(function(urls) {
-              urls.forEach(function(u) { if (allUrls.indexOf(u) === -1) allUrls.push(u); });
-            });
-          })).then(function() {
-            // Also scan the page itself for direct m3u8
-            var reDirect = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
-            var dm;
-            while ((dm = reDirect.exec(html)) !== null) {
-              if (allUrls.indexOf(dm[0]) === -1) allUrls.push(dm[0]);
-            }
-            return buildStreams(allUrls, best.url, "Movie");
-          });
-        });
+      log("Resolving movie: " + best.slug);
+      return getMovieVideos(best.slug).then(function(servers) {
+        if (!servers.length) return [];
+        var title = best.title + (meta.year ? " (" + meta.year + ")" : "");
+        return buildStreams(servers, BASE + "/movies/" + best.slug, title);
       });
     });
   }).catch(function(err) {
@@ -552,52 +542,18 @@ function getMovieStreams(tmdbId) {
 
 // ---------------------------------------------------------------- TV flow
 function getTvStreams(tmdbId, season, episode) {
+  var s = Number(season) || 1;
+  var e = Number(episode) || 1;
   return getTmdbTitles(tmdbId, "tv").then(function(meta) {
     return searchMany(meta.titles).then(function(all) {
-      var best = chooseResult(all, meta.titles, "series");
+      var best = chooseResult(all, meta.titles);
       if (!best) return [];
-      log("Resolving: " + best.url);
-
-      return fetchText(best.url, BASE + "/").then(function(html) {
-        // Look for season/episode links on the page
-        var seasonEpisodePattern = new RegExp("season[-/ ]?" + season + ".*?episode[-/ ]?" + episode, "i");
-        var epMatch = html.match(seasonEpisodePattern);
-        var epUrl = best.url;
-        if (epMatch) {
-          // Try to find a link near the episode
-          var near = html.slice(Math.max(0, epMatch.index - 500), epMatch.index + 500);
-          var linkMatch = near.match(/href\s*=\s*["']([^"']+)["']/i);
-          if (linkMatch) {
-            var u = linkMatch[1];
-            if (u.indexOf("http") !== 0) u = BASE + (u.charAt(0) === "/" ? "" : "/") + u;
-            epUrl = u;
-          }
-        }
-
-        return resolvePlayerUrl(epUrl).then(function(playerRes) {
-          var allUrls = [];
-          var combined = html + " " + JSON.stringify(playerRes.raw || "");
-          var closeloadEmbeds = [];
-          var re = /(https?:\/\/(?:[\w.-]+\.)?closeload\.top[^"'\s<>]*)/gi;
-          var m;
-          while ((m = re.exec(combined)) !== null) {
-            if (closeloadEmbeds.indexOf(m[1]) === -1) closeloadEmbeds.push(m[1]);
-          }
-
-          return Promise.all(closeloadEmbeds.map(function(embed) {
-            return extractCloseload(embed, epUrl).then(function(urls) {
-              urls.forEach(function(u) { if (allUrls.indexOf(u) === -1) allUrls.push(u); });
-            });
-          })).then(function() {
-            var reDirect = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*/gi;
-            var dm;
-            while ((dm = reDirect.exec(html)) !== null) {
-              if (allUrls.indexOf(dm[0]) === -1) allUrls.push(dm[0]);
-            }
-            var label = "S" + (season < 10 ? "0" + season : season) + "E" + (episode < 10 ? "0" + episode : episode);
-            return buildStreams(allUrls, epUrl, label);
-          });
-        });
+      log("Resolving TV: " + best.slug + " S" + s + "E" + e);
+      return getTvServers(best.slug, s, e).then(function(servers) {
+        if (!servers.length) return [];
+        var tag = "S" + (s < 10 ? "0" + s : s) + "E" + (e < 10 ? "0" + e : e);
+        var title = best.title + " " + tag;
+        return buildStreams(servers, BASE + "/tv/" + best.slug, title);
       });
     });
   }).catch(function(err) {
