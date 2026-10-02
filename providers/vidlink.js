@@ -1,3 +1,16 @@
+/**
+ * VidLink.pro provider  (v2 — full-page Referer + browser headers)
+ *
+ * The API is confirmed working (returns 1080p/480p/360p). The buffering was
+ * caused by sending a root Referer instead of the actual embed page URL.
+ * VidLink's CDN checks the exact page path for segment requests.
+ *
+ * Changes vs v1:
+ *  - Referer is now https://vidlink.pro/movie/{tmdbId}  (or /tv/{id}/{s}/{e})
+ *  - Origin reflects the same URL
+ *  - Full Chrome header set added (Sec-Fetch-*, Accept-Language, etc.)
+ *  - Stream log now shows the exact returned URL for diagnosis
+ */
 
 var PROVIDER_ID = "vidlink";
 var PROVIDER_NAME = "VidLink";
@@ -5,7 +18,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 var ENC_API = "https://enc-dec.app/api/enc-vidlink";
 var VIDLINK_API = "https://vidlink.pro/api/b";
-var VIDLINK_REFERER = "https://vidlink.pro";
+var VIDLINK_BASE = "https://vidlink.pro";
 
 var FETCH_TIMEOUT_MS = 12000;
 
@@ -84,8 +97,20 @@ function qualityLabel(q) {
 }
 
 // ---------------------------------------------------------------- stream builder
-function buildStreams(qualities, displayTitle) {
+// embedPageUrl is used as Referer/Origin so the CDN accepts segment requests.
+function buildStreams(qualities, displayTitle, embedPageUrl) {
   var streams = [];
+  var browserHeaders = {
+    "User-Agent": UA,
+    "Referer": embedPageUrl,
+    "Origin": VIDLINK_BASE,
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin"
+  };
+
   Object.keys(qualities || {}).forEach(function(key) {
     var entry = qualities[key];
     if (!entry) return;
@@ -94,6 +119,8 @@ function buildStreams(qualities, displayTitle) {
 
     var isHls = /\.m3u8/i.test(url);
     var qLabel = qualityLabel(key);
+    log("  quality " + qLabel + " -> " + url.slice(0, 100) + "...");
+
     streams.push({
       name: PROVIDER_NAME + " " + qLabel,
       title: displayTitle + " • " + qLabel,
@@ -101,15 +128,11 @@ function buildStreams(qualities, displayTitle) {
       quality: qLabel,
       size: "Unknown",
       type: isHls ? "hls" : "mp4",
-      headers: {
-        "User-Agent": UA,
-        "Referer": VIDLINK_REFERER,
-        "Origin": VIDLINK_REFERER,
-        "Accept": "*/*"
-      },
+      headers: browserHeaders,
       provider: PROVIDER_ID
     });
   });
+
   streams.sort(function(a, b) {
     return qualityToNumber(b.quality) - qualityToNumber(a.quality);
   });
@@ -120,6 +143,15 @@ function buildStreams(qualities, displayTitle) {
 function getStreamsFor(tmdbId, mediaType, season, episode) {
   var type = mediaType === "tv" ? "tv" : "movie";
   var displayTitle;
+  var embedPageUrl;
+
+  // Build the embed page URL — this is what VidLink's own player uses
+  if (type === "movie") {
+    embedPageUrl = VIDLINK_BASE + "/movie/" + tmdbId;
+  } else {
+    embedPageUrl = VIDLINK_BASE + "/tv/" + tmdbId + "/" + season + "/" + episode;
+  }
+
   return fetchTmdb(tmdbId, type).then(function(data) {
     var title = type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name);
     var year = type === "movie" ? (data.release_date || "") : (data.first_air_date || "");
@@ -129,7 +161,7 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
       var p2 = function(n) { return n < 10 ? "0" + n : String(n); };
       displayTitle = title + " S" + p2(season) + "E" + p2(episode);
     }
-    log(type + ' "' + title + '"');
+    log(type + ' "' + title + '" — Referer will be: ' + embedPageUrl);
   }).catch(function() {
     displayTitle = type === "movie" ? ("TMDB " + tmdbId) : ("TMDB " + tmdbId + " S" + season + "E" + episode);
   }).then(function() {
@@ -146,8 +178,10 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
 
     return fetchJson(url, {
       "User-Agent": UA,
-      "Referer": VIDLINK_REFERER,
-      "Accept": "application/json, text/plain, */*"
+      "Referer": embedPageUrl,
+      "Origin": VIDLINK_BASE,
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9"
     }).then(function(data) {
       var stream = data && data.stream;
       if (!stream) {
@@ -156,15 +190,14 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
       }
       var qualities = stream.qualities;
       if (!qualities) {
-        // legacy fallback — old API returned stream.playlist
         if (stream.playlist) {
           log("Legacy playlist format detected");
-          return buildStreams({ "auto": { url: stream.playlist } }, displayTitle);
+          return buildStreams({ "auto": { url: stream.playlist } }, displayTitle, embedPageUrl);
         }
         log("No qualities in stream");
         return [];
       }
-      var streams = buildStreams(qualities, displayTitle);
+      var streams = buildStreams(qualities, displayTitle, embedPageUrl);
       log("Returned " + streams.length + " stream(s)");
       return streams;
     });
