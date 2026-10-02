@@ -4,6 +4,8 @@ var KEY_HEX = "c75136c5668bbfe65a7ecad431a745db68b5f381555b38d8f6c699449cf11fcd"
 var UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 var TOKEN_TTL = 480;
 var CHECK_TIMEOUT = 12000;
+var MAX_ITEMS = 6;        // media URLs taken from the API answer
+var MAX_VARIANTS = 4;     // per master playlist: 1080p / 720p / 480p / 360p entries
 
 /* ---------- helpers ---------- */
 
@@ -42,6 +44,13 @@ function streamHeaders() {
     "Referer": API_BASE + "/",
     "x-playback-environment": "webkit"
   };
+}
+
+function copyHeaders(h, extra) {
+  var o = {};
+  Object.keys(h).forEach(function(k) { o[k] = h[k]; });
+  if (extra) Object.keys(extra).forEach(function(k) { o[k] = extra[k]; });
+  return o;
 }
 
 function fetchText(url, headers) {
@@ -310,54 +319,204 @@ function qualityFromText(s) {
   return "";
 }
 
-function qualityFromMaster(text) {
-  var maxW = 0, maxH = 0, m;
-  var re = /RESOLUTION=(\d+)x(\d+)/gi;
-  while ((m = re.exec(text)) !== null) {
-    var w = parseInt(m[1], 10), h = parseInt(m[2], 10);
-    if (w > maxW) { maxW = w; maxH = h; }
-  }
-  if (!maxW) return "";
-  if (maxW >= 3600 || maxH >= 2000) return "4K";
-  if (maxW >= 1800 || maxH >= 1000) return "1080p";
-  if (maxW >= 1200 || maxH >= 650) return "720p";
-  if (maxW >= 800 || maxH >= 450) return "480p";
+/* ---------- HLS: master parsing + real playability checks ---------- */
+
+function labelFromRes(w, h) {
+  if (!w && !h) return "";
+  if (w >= 3600 || h >= 2000) return "4K";
+  if (w >= 1800 || h >= 1000) return "1080p";
+  if (w >= 1200 || h >= 650) return "720p";
+  if (w >= 800 || h >= 450) return "480p";
   return "360p";
 }
 
-function makeStream(item, kind, quality, verified) {
-  var parts = ["🔗 VidLink"];
+function normPath(p) {
+  var out = [];
+  p.split("/").forEach(function(seg) {
+    if (seg === ".") return;
+    if (seg === "..") { if (out.length > 1) out.pop(); return; }
+    out.push(seg);
+  });
+  return out.join("/");
+}
+
+// Resolve a playlist/segment reference against the URL it was found in.
+function resolveRel(base, rel) {
+  rel = String(rel || "").trim();
+  if (/^https?:\/\//i.test(rel)) return rel;
+  var m = String(base).match(/^(https?:)\/\/([^\/?#]+)([^?#]*)/i);
+  if (!m) return rel;
+  if (rel.indexOf("//") === 0) return m[1] + rel;
+  var qi = rel.search(/[?#]/);
+  var relPath = qi === -1 ? rel : rel.slice(0, qi);
+  var relTail = qi === -1 ? "" : rel.slice(qi);
+  var path = relPath.charAt(0) === "/" ? relPath : (m[3].replace(/[^\/]*$/, "") || "/") + relPath;
+  return m[1] + "//" + m[2] + normPath(path) + relTail;
+}
+
+// #EXT-X-STREAM-INF entries of a master playlist -> [{url,width,height,bandwidth}]
+function parseMaster(text, baseUrl) {
+  var lines = String(text || "").split(/\r?\n/);
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (line.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+    var res = line.match(/RESOLUTION=(\d+)x(\d+)/i);
+    var bw = line.match(/(?:^|[,:])BANDWIDTH=(\d+)/i);
+    var j = i + 1;
+    while (j < lines.length && (!lines[j].trim() || lines[j].trim().charAt(0) === "#")) j++;
+    if (j >= lines.length) break;
+    out.push({
+      url: resolveRel(baseUrl, lines[j].trim()),
+      width: res ? parseInt(res[1], 10) : 0,
+      height: res ? parseInt(res[2], 10) : 0,
+      bandwidth: bw ? parseInt(bw[1], 10) : 0
+    });
+    i = j;
+  }
+  return out;
+}
+
+function firstUri(text) {
+  var lines = String(text || "").split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i].trim();
+    if (l && l.charAt(0) !== "#") return l;
+  }
+  return "";
+}
+
+// Ask for the first 2 bytes only; the status code is what we want.
+function probeUrl(url) {
+  return fetch(url, { headers: copyHeaders(streamHeaders(), { "Range": "bytes=0-1" }), redirect: "follow" }).then(function(r) {
+    return r.ok ? { state: "ok" } : { state: "bad", note: "seg " + r.status };
+  });
+}
+
+function errNote(err) {
+  return String((err && err.message) || err || "error").slice(0, 24);
+}
+
+// state: "ok"  = variant playlist AND its first segment answered with these headers
+//        "pl"  = could not tell (unusual playlist)
+//        "bad" = playlist or first segment refused / unreachable
+function checkVariant(url) {
+  return fetchText(url, streamHeaders()).then(function(text) {
+    var body = String(text || "");
+    var at = body.indexOf("#EXTINF");
+    if (body.indexOf("#EXTM3U") === -1 || at === -1) return { state: "pl" };
+    var seg = firstUri(body.slice(at));
+    if (!seg) return { state: "pl" };
+    return probeUrl(resolveRel(url, seg));
+  }).catch(function(err) {
+    return { state: "bad", note: errNote(err) };
+  });
+}
+
+function bestState(list) {
+  var rank = { ok: 0, pl: 1, bad: 2 };
+  var best = null;
+  list.forEach(function(s) { if (!best || rank[s.state] < rank[best.state]) best = s; });
+  return best || { state: "pl" };
+}
+
+/* ---------- stream objects ---------- */
+
+function marker(st) {
+  if (st.state === "ok") return "\u2713";
+  if (st.state === "bad") return "\u2717 " + (st.note || "failed");
+  return "\u26A0 " + (st.note || "unchecked");
+}
+
+// opts: { url, quality, state, tag, height }
+function makeStream(item, opts) {
+  var parts = ["\uD83D\uDD17 VidLink"];
   if (item.ctx.source) parts.push(item.ctx.source);
   if (item.ctx.lang) parts.push(item.ctx.lang);
-  if (quality) parts.push(quality);
-  if (!verified) parts.push("unverified");
+  if (opts.tag === "Auto") parts.push("Auto" + (opts.quality ? " (up to " + opts.quality + ")" : ""));
+  else if (opts.quality) parts.push(opts.quality);
   var h = streamHeaders();
   return {
-    name: "🔗 VidLink",
-    title: parts.join(" \u2022 "),
-    url: item.url,
-    quality: quality || "Auto",
+    name: "\uD83D\uDD17 VidLink",
+    title: parts.join(" \u2022 ") + " " + marker(opts.state),
+    url: opts.url,
+    quality: opts.tag === "Auto" ? "Auto" : (opts.quality || "Auto"),
     referer: h["Referer"],
     headers: h,
-    _kind: kind,
-    _verified: verified
+    _state: opts.state.state,
+    _h: opts.height || 0,
+    _auto: opts.tag === "Auto" ? 1 : 0
   };
 }
 
 function resolveItem(item) {
   var url = item.url;
   var hint = qualityFromText(item.ctx.quality) || qualityFromText(url) || qualityFromText(item.path);
-  if (/\.mp4(\?|$)/i.test(url) || /\.(mkv|webm)(\?|$)/i.test(url)) return Promise.resolve([makeStream(item, "mp4", hint, true)]);
-  if (/\.mpd(\?|$)/i.test(url)) return Promise.resolve([makeStream(item, "dash", hint, true)]);
+
+  if (/\.(mp4|mkv|webm)(\?|$)/i.test(url)) {
+    return probeUrl(url).catch(function(err) { return { state: "bad", note: errNote(err) }; }).then(function(st) {
+      return [makeStream(item, { url: url, quality: hint, state: st })];
+    });
+  }
+  if (/\.mpd(\?|$)/i.test(url)) return Promise.resolve([makeStream(item, { url: url, quality: hint, state: { state: "pl" } })]);
+
   return fetchText(url, streamHeaders()).then(function(text) {
     var body = String(text || "").replace(/^\s+/, "");
-    if (body.indexOf("#EXTM3U") === 0) return [makeStream(item, "hls", qualityFromMaster(body) || hint, true)];
-    if (/^<\?xml|^<MPD/i.test(body)) return [makeStream(item, "dash", hint, true)];
-    console.log("[VidLink] unexpected playlist body, keeping unverified");
-    return [makeStream(item, "unknown", hint, false)];
+    if (/^<\?xml|^<MPD/i.test(body)) return [makeStream(item, { url: url, quality: hint, state: { state: "pl" } })];
+    if (body.indexOf("#EXTM3U") !== 0) {
+      console.log("[VidLink] unexpected playlist body, keeping unchecked");
+      return [makeStream(item, { url: url, quality: hint, state: { state: "pl" } })];
+    }
+
+    var variants = parseMaster(body, url);
+
+    // already a media playlist (no variants): check its first segment
+    if (!variants.length) {
+      return checkVariant(url).then(function(st) {
+        return [makeStream(item, { url: url, quality: hint, state: st })];
+      });
+    }
+
+    variants.sort(function(a, b) { return (b.height - a.height) || (b.bandwidth - a.bandwidth); });
+    var picked = [];
+    var seenUrl = {};
+    variants.forEach(function(v) {
+      if (picked.length < MAX_VARIANTS && !seenUrl[v.url]) { seenUrl[v.url] = 1; picked.push(v); }
+    });
+
+    return Promise.all(picked.map(function(v) {
+      return checkVariant(v.url).then(function(st) { return { v: v, st: st }; });
+    })).then(function(rs) {
+      var top = rs[0].v;
+      var out = [];
+      var states = rs.map(function(r) { return r.st; });
+      var anyOk = states.some(function(s) { return s.state === "ok"; });
+      var failed = rs.filter(function(r) { return r.st.state === "bad"; }).map(function(r) {
+        return labelFromRes(r.v.width, r.v.height) || "a variant";
+      });
+      // Auto lets the player pick; if some variants are dead it may pick one of them
+      var masterState = (anyOk && failed.length) ? { state: "pl", note: failed.join("/") + " fails" } : bestState(states);
+      out.push(makeStream(item, {
+        url: url,
+        quality: labelFromRes(top.width, top.height) || hint,
+        state: masterState,
+        tag: "Auto",
+        height: top.height
+      }));
+      // one entry per variant so a lighter one can be chosen
+      rs.forEach(function(r) {
+        out.push(makeStream(item, {
+          url: r.v.url,
+          quality: labelFromRes(r.v.width, r.v.height) || hint,
+          state: r.st,
+          height: r.v.height
+        }));
+      });
+      return out;
+    });
   }).catch(function(err) {
-    console.log("[VidLink] playlist check failed:", err.message, "- keeping unverified");
-    return [makeStream(item, "unknown", hint, false)];
+    console.log("[VidLink] playlist check failed:", err.message, "- keeping unchecked");
+    return [makeStream(item, { url: url, quality: hint, state: { state: "bad", note: errNote(err) } })];
   });
 }
 
@@ -372,27 +531,30 @@ function getStreams(tmdbId, mediaType, season, episode) {
     var found = [];
     collectMedia(data, "", "", { source: "", lang: "", quality: "" }, found, 0);
     var seen = {};
-    found = found.filter(function(f) { if (seen[f.url]) return false; seen[f.url] = 1; return true; });
+    found = found.filter(function(f) { if (seen[f.url]) return false; seen[f.url] = 1; return true; }).slice(0, MAX_ITEMS);
     console.log("[VidLink] media urls found:", found.length);
     if (!found.length) {
       console.log("[VidLink] response sample:", JSON.stringify(data).slice(0, 400));
       return [];
     }
     return Promise.all(found.map(function(item) {
-      return withTimeout(resolveItem(item), CHECK_TIMEOUT, [makeStream(item, "unknown", "", false)]);
+      var fallback = [makeStream(item, { url: item.url, quality: "", state: { state: "pl" } })];
+      return withTimeout(resolveItem(item), CHECK_TIMEOUT, fallback);
     })).then(function(groups) {
-      var ok = [], rest = [];
-      groups.forEach(function(g) {
-        g.forEach(function(s) {
-          var v = s._verified;
-          delete s._kind;
-          delete s._verified;
-          (v ? ok : rest).push(s);
-        });
+      var all = [];
+      groups.forEach(function(g) { g.forEach(function(s) { all.push(s); }); });
+
+      // drop entries that failed the playlist/segment check, unless nothing else is left
+      var usable = all.filter(function(s) { return s._state !== "bad"; });
+      var list = usable.length ? usable : all;
+
+      var rank = { ok: 0, pl: 1, bad: 2 };
+      list.sort(function(a, b) {
+        return (rank[a._state] - rank[b._state]) || (b._auto - a._auto) || (b._h - a._h);
       });
-      var all = ok.concat(rest);
-      console.log("[VidLink] streams:", all.length, "(verified:", ok.length + ")");
-      return all;
+      list.forEach(function(s) { delete s._state; delete s._h; delete s._auto; });
+      console.log("[VidLink] streams:", list.length, "(checked ok / total:", usable.length + "/" + all.length + ")");
+      return list;
     });
   }).catch(function(err) {
     console.log("[VidLink] error:", err.message);
