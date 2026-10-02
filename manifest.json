@@ -17,20 +17,6 @@
       "supportsExternalPlayer": true
     },
     {
-  "id": "himovies",
-  "name": "HiMovies",
-  "description": "Movies and TV series from HiMovies",
-  "version": "1.0.0",
-  "author": "vanseleem",
-  "supportedTypes": ["movie", "tv"],
-  "filename": "providers/himovies.js",
-  "enabled": true,
-  "formats": ["iframe", "m3u8"],
-  "contentLanguage": ["en"],
-  "limited": false,
-  "supportsExternalPlayer": true
-    },
-    {
       "id": "netmirror",
       "name": "NetMirror",
       "description": "Netflix | Prime | Disney",
@@ -43,19 +29,6 @@
       "formats": ["mp4", "m3u8", "mkv"],
       "logo": "https://i.postimg.cc/L64M3bYV/netmirror.png",
       "contentLanguage": ["en", "hi", "ta", "te"]
-    },
-    {
-      "id": "movix",
-      "name": "MovixFX",
-      "description": "Movies and TV series in English & French (dubbed/subtitled)",
-      "version": "1.0.0",
-      "author": "wooodyhood",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/movixFX.js",
-      "enabled": true,
-      "formats": ["mp4", "m3u8"],
-      "logo": "https://i.postimg.cc/XYrPQm87/movix.png",
-      "contentLanguage": ["en", "fr"]
     },
     {
       "id": "nuvio-movix",
