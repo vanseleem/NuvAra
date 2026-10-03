@@ -1,15 +1,48 @@
+/**
+ * Videasy provider (fixed)
+ *
+ * What was wrong
+ *  - Nuvio Mobile's JS host has NO setTimeout/clearTimeout. Every timeout and the
+ *    "return whatever is ready by then" deadline in the old script silently did nothing,
+ *    so one slow or failing upstream request kept the whole provider pending until Nuvio
+ *    killed it - and then NOTHING shows, not even the debug link.
+ *  - retry() re-ran every failure, including slow ones (a 502 that takes 15s -> 30s).
+ *  - Only one API host was tried.
+ *
+ * What changed
+ *  - Time budgets use Date.now() (no timers needed).
+ *  - Several API hosts are raced in parallel (seed -> sources per host).
+ *  - Returns EARLY once enough servers delivered links (or a soft time limit passed).
+ *  - Retries only fast failures.
+ *  - The debug link appears as soon as every attempt has failed, with per-host reasons.
+ *
+ * Protocol (unchanged, matches the maintainer's reference sample):
+ *  seed -> sources-with-title (double-encoded title, enc=2) -> POST enc-dec.app/api/dec-videasy
+ */
+
 var PROVIDER_ID = "videasy";
 var PROVIDER_NAME = "Videasy";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 
-var API_BASE = "https://api.speedracelight.com";
+// API hosts, all tried in parallel. A host that is down only costs one failed request.
+var API_BASES = [
+  "https://api.speedracelight.com",
+  "https://api.videasy.to",
+  "https://api.wingsdatabase.com"
+];
 var DEC_API = "https://enc-dec.app/api/dec-videasy";
 var PLAYER_ORIGIN = "https://player.videasy.to";
 var PLAYER_REFERER = "https://player.videasy.to/";
 
-var FETCH_TIMEOUT_MS = 10000;
-var GLOBAL_DEADLINE_MS = 22000; // return whatever is ready by then (host may kill slow scrapers silently)
+// ---- timing (all based on Date.now(); work without setTimeout)
+var FETCH_TIMEOUT_MS = 10000;     // only enforced if the host provides setTimeout
+var GLOBAL_DEADLINE_MS = 22000;   // only enforced if the host provides setTimeout
+var SOFT_RETURN_MS = 9000;        // after this, return as soon as ANY server has links
+var MIN_OK_SERVERS = 3;           // return immediately once this many servers delivered links
+var FAST_FAIL_MS = 4000;          // a failure faster than this is retried once
+var RETRY_BUDGET_MS = 12000;      // no retries after this much total time
+var EXPAND_BUDGET_MS = 14000;     // no HLS-master expansion after this much total time
 
 // true = when zero links come back, return ONE fake link whose title says why (set false once stable)
 var DEBUG_STREAM = true;
@@ -17,7 +50,7 @@ var DEBUG_STREAM = true;
 // true = when a source is an HLS master, also list one link per quality variant
 var EXPAND_HLS = true;
 
-// path = speedracelight route, only = keep sources whose "quality" equals this (hdmovie mixes languages)
+// path = route, only = keep sources whose "quality" equals this (hdmovie mixes languages)
 var SERVERS = [
   { name: "Yoru", path: "cdn" },
   { name: "Breach", path: "m4uhd" },
@@ -32,6 +65,7 @@ var SERVERS = [
 function log(m) { console.log("[Videasy] " + m); }
 
 // ---------------------------------------------------------------- http
+// Only enforces a timeout when the host has timers; otherwise returns the promise untouched.
 function withTimeout(promise, ms, label) {
   if (typeof setTimeout !== "function") return promise;
   return new Promise(function(resolve, reject) {
@@ -39,10 +73,11 @@ function withTimeout(promise, ms, label) {
     var t = setTimeout(function() {
       if (!done) { done = true; reject(new Error((label || "request") + " timeout")); }
     }, ms);
+    function clear() { if (typeof clearTimeout === "function") clearTimeout(t); }
     promise.then(function(v) {
-      if (!done) { done = true; clearTimeout(t); resolve(v); }
+      if (!done) { done = true; clear(); resolve(v); }
     }, function(e) {
-      if (!done) { done = true; clearTimeout(t); reject(e); }
+      if (!done) { done = true; clear(); reject(e); }
     });
   });
 }
@@ -79,12 +114,27 @@ function postJson(url, body, timeoutMs) {
   );
 }
 
+// Retry ONCE, but only if the failure came back fast and we still have time budget.
+// (A slow failure retried again would just double the wait.)
+function retryFast(fn, ctx) {
+  var t0 = Date.now();
+  return fn().catch(function(e) {
+    var tookMs = Date.now() - t0;
+    if (tookMs > FAST_FAIL_MS || (Date.now() - ctx.t0) > RETRY_BUDGET_MS) throw e;
+    return fn();
+  });
+}
+
 // ---------------------------------------------------------------- helpers
 // Python's urllib quote(s, safe="") also escapes ! ' ( ) * - match it, then apply twice (Videasy wants double-encoded titles)
 function pyQuote(s) {
   return encodeURIComponent(s).replace(/[!'()*]/g, function(c) {
     return "%" + c.charCodeAt(0).toString(16).toUpperCase();
   });
+}
+
+function hostTag(base) {
+  return String(base).replace(/^https?:\/\/(api\.)?/i, "").split(".")[0];
 }
 
 function parseQuality(q) {
@@ -166,18 +216,27 @@ function fetchMeta(tmdbId, type) {
 }
 
 // ---------------------------------------------------------------- videasy
-function buildSourcesUrl(server, ctx) {
+function fetchSeed(base, ctx) {
+  return retryFast(function() {
+    return fetchJson(base + "/seed?mediaId=" + encodeURIComponent(ctx.tmdbId), ctx.apiHeaders);
+  }, ctx).then(function(j) {
+    if (!j || !j.seed) throw new Error("no seed in " + shortJson(j, 60));
+    return String(j.seed);
+  });
+}
+
+function buildSourcesUrl(base, seed, server, ctx) {
   var q = "title=" + pyQuote(pyQuote(ctx.meta.title)) +
     "&mediaType=" + ctx.type +
     "&year=" + ctx.meta.year;
   if (ctx.type === "tv") q += "&episodeId=" + ctx.episode + "&seasonId=" + ctx.season;
-  q += "&tmdbId=" + ctx.tmdbId + "&imdbId=" + ctx.meta.imdbId + "&enc=2&seed=" + ctx.seed;
+  q += "&tmdbId=" + ctx.tmdbId + "&imdbId=" + ctx.meta.imdbId + "&enc=2&seed=" + seed;
   if (server.extra) q += server.extra;
-  return API_BASE + "/" + server.path + "/sources-with-title?" + q;
+  return base + "/" + server.path + "/sources-with-title?" + q;
 }
 
-function decrypt(encText, ctx) {
-  return postJson(DEC_API, { text: encText, id: String(ctx.tmdbId), seed: ctx.seed }).then(function(j) {
+function decrypt(encText, ctx, seed) {
+  return postJson(DEC_API, { text: encText, id: String(ctx.tmdbId), seed: seed }).then(function(j) {
     if (!j || j.status !== 200 || !j.result) {
       throw new Error("status " + (j && j.status) + (j && j.error ? " " + j.error : (j && !j.result ? " no result" : "")));
     }
@@ -234,7 +293,7 @@ function makeStream(server, ctx, url, kind, h, bw, rank) {
   var label = qualityLabel(h, bw);
   return {
     name: PROVIDER_NAME + " " + server.name + " " + label,
-    title: ctx.displayTitle + " • " + label + " • " + server.name,
+    title: ctx.displayTitle + " \u2022 " + label + " \u2022 " + server.name,
     url: url,
     quality: label,
     size: "Unknown",
@@ -256,6 +315,7 @@ function expandSource(server, src, ctx) {
 
   var base = makeStream(server, ctx, url, kind, 0, 0, 1000000);
   if (kind !== "hls" || !EXPAND_HLS) return Promise.resolve([base]);
+  if ((Date.now() - ctx.t0) > EXPAND_BUDGET_MS) return Promise.resolve([base]);   // out of time: keep the master only
 
   return fetchText(url, ctx.streamHeaders).then(function(text) {
     var variants = expandHls(url, text);
@@ -269,22 +329,18 @@ function expandSource(server, src, ctx) {
   });
 }
 
-function retry(fn, times) {
-  return fn().catch(function(e) {
-    if (times <= 0) throw e;
-    return retry(fn, times - 1);
-  });
-}
-
-function runServer(server, ctx) {
-  var tag = server.name;
-  return retry(function() { return fetchText(buildSourcesUrl(server, ctx), ctx.apiHeaders); }, 1).catch(function(e) {
+// One server on one API host. Never rejects; resolves with a (possibly empty) list.
+function runServer(apiBase, seed, server, ctx) {
+  var tag = hostTag(apiBase) + "/" + server.name;
+  return retryFast(function() {
+    return fetchText(buildSourcesUrl(apiBase, seed, server, ctx), ctx.apiHeaders);
+  }, ctx).catch(function(e) {
     throw new Error("sources " + (e && e.message));
   }).then(function(enc) {
     if (!enc || enc.length < 8) throw new Error("empty payload");
     if (/^\s*</.test(enc)) throw new Error("html reply (blocked?) " + shortJson(enc, 40));
     if (/^\s*\{/.test(enc)) throw new Error("json reply " + shortJson(enc, 80));
-    return decrypt(enc, ctx).catch(function(e) { throw new Error("decrypt " + (e && e.message)); });
+    return decrypt(enc, ctx, seed).catch(function(e) { throw new Error("decrypt " + (e && e.message)); });
   }).then(function(result) {
     var list = pickSources(result, server);
     log(tag + ": " + list.length + " source(s)");
@@ -308,31 +364,60 @@ function runServer(server, ctx) {
   });
 }
 
-// Run all servers in parallel; resolve when all finished OR the deadline hits (partial results kept).
-function runAll(ctx) {
+// Fan out every server on every API host. Resolves when:
+//  - every task finished, OR
+//  - enough servers delivered links (MIN_OK_SERVERS), OR
+//  - something is ready and SOFT_RETURN_MS has passed (checked whenever a task completes), OR
+//  - the hard deadline fires (only if the host has setTimeout).
+function collectAll(ctx, seedPs) {
   return new Promise(function(resolve) {
-    var all = [];
-    var pending = SERVERS.length;
+    var total = API_BASES.length * SERVERS.length;
+    var done = 0;
+    var ok = 0;
+    var streams = [];
     var finished = false;
     var timer = null;
-    function finish() {
+
+    function finish(reason) {
       if (finished) return;
       finished = true;
-      if (timer) clearTimeout(timer);
-      resolve(all);
+      if (timer && typeof clearTimeout === "function") clearTimeout(timer);
+      log("collect: " + reason + " | tasks " + done + "/" + total + ", ok " + ok + ", " + streams.length + " link(s), " + (Date.now() - ctx.t0) + "ms");
+      resolve(streams.slice());
     }
+
+    function check() {
+      if (finished) return;
+      var have = streams.length > 0;
+      if (done >= total) return finish("all tasks done");
+      if (have && ok >= MIN_OK_SERVERS) return finish("enough servers");
+      if (have && (Date.now() - ctx.t0) >= SOFT_RETURN_MS) return finish("soft limit");
+    }
+
+    function taskDone(list) {
+      done++;
+      if (list && list.length) { ok++; streams = streams.concat(list); }
+      check();
+    }
+
     if (typeof setTimeout === "function") {
       timer = setTimeout(function() {
-        ctx.diag.push("deadline " + (GLOBAL_DEADLINE_MS / 1000) + "s hit, " + pending + " server(s) still pending");
-        finish();
+        ctx.diag.push("deadline " + (GLOBAL_DEADLINE_MS / 1000) + "s hit, " + (total - done) + " task(s) pending");
+        finish("deadline");
       }, GLOBAL_DEADLINE_MS);
     }
-    SERVERS.forEach(function(sv) {
-      runServer(sv, ctx).then(function(list) {
-        list.forEach(function(x) { all.push(x); });
-      }).then(function() {
-        pending--;
-        if (pending <= 0) finish();
+
+    API_BASES.forEach(function(base, i) {
+      seedPs[i].then(function(res) {
+        if (!res.ok) {
+          ctx.diag.push(hostTag(base) + ": seed " + res.err);
+          log(hostTag(base) + ": seed failed - " + res.err);
+          for (var k = 0; k < SERVERS.length; k++) taskDone([]);
+          return;
+        }
+        SERVERS.forEach(function(sv) {
+          runServer(base, res.seed, sv, ctx).then(taskDone);
+        });
       });
     });
   });
@@ -354,8 +439,9 @@ function diagStream(ctx) {
 // ---------------------------------------------------------------- core
 function getStreamsFor(tmdbId, type, season, episode) {
   var ctx = {
+    t0: Date.now(),
     tmdbId: tmdbId, type: type, season: season, episode: episode,
-    meta: { title: "", year: "", imdbId: "" }, seed: "", displayTitle: "", diag: [],
+    meta: { title: "", year: "", imdbId: "" }, displayTitle: "", diag: [],
     apiHeaders: {
       "Accept": "*/*",
       "Origin": PLAYER_ORIGIN,
@@ -370,32 +456,29 @@ function getStreamsFor(tmdbId, type, season, episode) {
     }
   };
 
-  // TMDB title + seed in parallel; seed is mandatory, TMDB failure only degrades the title/year/imdb
-  var metaP = retry(function() { return fetchMeta(tmdbId, type); }, 1).catch(function(e) {
+  // seeds (one per API host) start immediately, in parallel with the TMDB lookup
+  var seedPs = API_BASES.map(function(base) {
+    return fetchSeed(base, ctx).then(function(seed) {
+      return { ok: true, seed: seed };
+    }, function(e) {
+      return { ok: false, err: (e && e.message) || "failed" };
+    });
+  });
+
+  // TMDB failure only degrades the title/year/imdb
+  var metaP = retryFast(function() { return fetchMeta(tmdbId, type); }, ctx).catch(function(e) {
     ctx.diag.push("TMDB: " + (e && e.message));
     return null;
   });
-  var seedP = retry(function() {
-    return fetchJson(API_BASE + "/seed?mediaId=" + encodeURIComponent(tmdbId), ctx.apiHeaders);
-  }, 1);
 
-  return Promise.all([metaP, seedP.catch(function(e) {
-    ctx.diag.push("seed: " + (e && e.message));
-    return null;
-  })]).then(function(r) {
-    if (r[0]) ctx.meta = r[0];
+  return metaP.then(function(meta) {
+    if (meta) ctx.meta = meta;
     var p2 = function(n) { return n < 10 ? "0" + n : String(n); };
     ctx.displayTitle = type === "movie"
       ? (ctx.meta.title || ("TMDB " + tmdbId)) + (ctx.meta.year ? " (" + ctx.meta.year + ")" : "")
       : (ctx.meta.title || ("TMDB " + tmdbId)) + " S" + p2(season) + "E" + p2(episode);
     log(type + ' "' + ctx.displayTitle + '"');
-
-    if (!r[1] || !r[1].seed) {
-      if (r[1]) ctx.diag.push("seed: no seed in " + shortJson(r[1], 80));
-      return [];
-    }
-    ctx.seed = String(r[1].seed);
-    return runAll(ctx);
+    return collectAll(ctx, seedPs);
   }).then(function(list) {
     var seen = {};
     var out = [];
