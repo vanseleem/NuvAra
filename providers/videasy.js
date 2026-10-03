@@ -8,8 +8,11 @@ var DEC_API = "https://enc-dec.app/api/dec-videasy";
 var PLAYER_ORIGIN = "https://player.videasy.to";
 var PLAYER_REFERER = "https://player.videasy.to/";
 
-var FETCH_TIMEOUT_MS = 12000;
-var SERVER_TIMEOUT_MS = 25000;
+var FETCH_TIMEOUT_MS = 10000;
+var GLOBAL_DEADLINE_MS = 22000; // return whatever is ready by then (host may kill slow scrapers silently)
+
+// true = when zero links come back, return ONE fake link whose title says why (set false once stable)
+var DEBUG_STREAM = true;
 
 // true = when a source is an HLS master, also list one link per quality variant
 var EXPAND_HLS = true;
@@ -176,18 +179,52 @@ function buildSourcesUrl(server, ctx) {
 function decrypt(encText, ctx) {
   return postJson(DEC_API, { text: encText, id: String(ctx.tmdbId), seed: ctx.seed }).then(function(j) {
     if (!j || j.status !== 200 || !j.result) {
-      throw new Error("decrypt failed" + (j && j.error ? ": " + j.error : ""));
+      throw new Error("status " + (j && j.status) + (j && j.error ? " " + j.error : (j && !j.result ? " no result" : "")));
     }
     return j.result;
   });
 }
 
+var SUB_KEY = /sub|caption|track|thumb|poster|vtt|srt|preview/i;
+var SUB_URL = /\.(vtt|srt|ass|ssa|jpg|jpeg|png|webp)(\?|#|$)/i;
+
+function walkSources(node, out, depth, key) {
+  if (node == null || depth > 6) return;
+  if (typeof node === "string") {
+    if (/^https?:\/\//i.test(node) && !SUB_KEY.test(key || "") && !SUB_URL.test(node)) out.push({ url: node });
+    return;
+  }
+  if (Array.isArray(node)) {
+    node.forEach(function(n) { walkSources(n, out, depth + 1, key); });
+    return;
+  }
+  if (typeof node === "object") {
+    var u = node.url || node.file || node.src || node.link || node.playlist || node.stream;
+    if (typeof u === "string" && /^https?:\/\//i.test(u)) {
+      if (!SUB_KEY.test(key || "") && !SUB_URL.test(u)) out.push(node);
+      return;
+    }
+    Object.keys(node).forEach(function(k) {
+      if (!SUB_KEY.test(k)) walkSources(node[k], out, depth + 1, k);
+    });
+  }
+}
+
+function shortJson(v, n) {
+  var t;
+  try { t = typeof v === "string" ? v : JSON.stringify(v); } catch (e) { t = String(v); }
+  return String(t).replace(/\s+/g, " ").slice(0, n || 140);
+}
+
 function pickSources(result, server) {
-  var list = (result && (result.sources || result.streams)) || [];
-  if (!Array.isArray(list)) return [];
+  if (typeof result === "string") {
+    try { result = JSON.parse(result); } catch (e) { /* keep string */ }
+  }
+  var list = [];
+  walkSources(result, list, 0, "");
   if (server.only) {
-    list = list.filter(function(s) {
-      return String(s.quality || s.language || "").toLowerCase() === server.only;
+    list = list.filter(function(x) {
+      return String(x.quality || x.language || x.label || "").toLowerCase() === server.only;
     });
   }
   return list;
@@ -210,10 +247,10 @@ function makeStream(server, ctx, url, kind, h, bw, rank) {
 
 // One source -> its own link, plus (for an HLS master) one link per quality variant.
 function expandSource(server, src, ctx) {
-  var url = src.url || src.file || src.src || src.playlist;
+  var url = src.url || src.file || src.src || src.link || src.playlist || src.stream;
   if (!url || String(url).indexOf("http") !== 0) return Promise.resolve([]);
   var kind = detectType(src.type, url);
-  var h = server.only ? 0 : parseQuality(src.quality);
+  var h = server.only ? 0 : parseQuality(src.quality || src.label || src.resolution);
 
   if (h > 0) return Promise.resolve([makeStream(server, ctx, url, kind, h, 0, h)]);
 
@@ -232,29 +269,93 @@ function expandSource(server, src, ctx) {
   });
 }
 
+function retry(fn, times) {
+  return fn().catch(function(e) {
+    if (times <= 0) throw e;
+    return retry(fn, times - 1);
+  });
+}
+
 function runServer(server, ctx) {
-  return fetchText(buildSourcesUrl(server, ctx), ctx.apiHeaders).then(function(enc) {
+  var tag = server.name;
+  return retry(function() { return fetchText(buildSourcesUrl(server, ctx), ctx.apiHeaders); }, 1).catch(function(e) {
+    throw new Error("sources " + (e && e.message));
+  }).then(function(enc) {
     if (!enc || enc.length < 8) throw new Error("empty payload");
-    return decrypt(enc, ctx);
+    if (/^\s*</.test(enc)) throw new Error("html reply (blocked?) " + shortJson(enc, 40));
+    if (/^\s*\{/.test(enc)) throw new Error("json reply " + shortJson(enc, 80));
+    return decrypt(enc, ctx).catch(function(e) { throw new Error("decrypt " + (e && e.message)); });
   }).then(function(result) {
     var list = pickSources(result, server);
-    log(server.name + ": " + list.length + " source(s)");
+    log(tag + ": " + list.length + " source(s)");
+    if (!list.length) {
+      ctx.diag.push(tag + ": 0 sources, result=" + shortJson(result, 110));
+      return [];
+    }
     return Promise.all(list.map(function(src) {
       return expandSource(server, src, ctx).catch(function() { return []; });
-    }));
-  }).then(function(groups) {
-    var flat = [];
-    groups.forEach(function(g) { flat = flat.concat(g); });
-    flat.sort(function(a, b) { return b._rank - a._rank; });
-    return flat;
+    })).then(function(groups) {
+      var flat = [];
+      groups.forEach(function(g) { flat = flat.concat(g); });
+      flat.sort(function(a, b) { return b._rank - a._rank; });
+      return flat;
+    });
+  }).catch(function(e) {
+    var msg = tag + ": " + (e && e.message);
+    log(msg);
+    ctx.diag.push(msg);
+    return [];
   });
+}
+
+// Run all servers in parallel; resolve when all finished OR the deadline hits (partial results kept).
+function runAll(ctx) {
+  return new Promise(function(resolve) {
+    var all = [];
+    var pending = SERVERS.length;
+    var finished = false;
+    var timer = null;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      resolve(all);
+    }
+    if (typeof setTimeout === "function") {
+      timer = setTimeout(function() {
+        ctx.diag.push("deadline " + (GLOBAL_DEADLINE_MS / 1000) + "s hit, " + pending + " server(s) still pending");
+        finish();
+      }, GLOBAL_DEADLINE_MS);
+    }
+    SERVERS.forEach(function(sv) {
+      runServer(sv, ctx).then(function(list) {
+        list.forEach(function(x) { all.push(x); });
+      }).then(function() {
+        pending--;
+        if (pending <= 0) finish();
+      });
+    });
+  });
+}
+
+function diagStream(ctx) {
+  return {
+    name: PROVIDER_NAME + " \u26A0 no links",
+    title: ctx.diag.join(" | ").slice(0, 400) || "unknown failure",
+    url: "https://videasy-debug.invalid/no-links.m3u8",
+    quality: "Auto",
+    size: "Unknown",
+    type: "hls",
+    headers: {},
+    provider: PROVIDER_ID
+  };
 }
 
 // ---------------------------------------------------------------- core
 function getStreamsFor(tmdbId, type, season, episode) {
   var ctx = {
     tmdbId: tmdbId, type: type, season: season, episode: episode,
-    meta: { title: "", year: "", imdbId: "" }, seed: "", displayTitle: "",
+    meta: { title: "", year: "", imdbId: "" }, seed: "", displayTitle: "", diag: [],
     apiHeaders: {
       "Accept": "*/*",
       "Origin": PLAYER_ORIGIN,
@@ -269,38 +370,43 @@ function getStreamsFor(tmdbId, type, season, episode) {
     }
   };
 
-  return fetchMeta(tmdbId, type).then(function(meta) {
-    ctx.meta = meta;
-  }).catch(function(e) {
-    log("TMDB failed: " + (e && e.message));
-  }).then(function() {
+  // TMDB title + seed in parallel; seed is mandatory, TMDB failure only degrades the title/year/imdb
+  var metaP = retry(function() { return fetchMeta(tmdbId, type); }, 1).catch(function(e) {
+    ctx.diag.push("TMDB: " + (e && e.message));
+    return null;
+  });
+  var seedP = retry(function() {
+    return fetchJson(API_BASE + "/seed?mediaId=" + encodeURIComponent(tmdbId), ctx.apiHeaders);
+  }, 1);
+
+  return Promise.all([metaP, seedP.catch(function(e) {
+    ctx.diag.push("seed: " + (e && e.message));
+    return null;
+  })]).then(function(r) {
+    if (r[0]) ctx.meta = r[0];
     var p2 = function(n) { return n < 10 ? "0" + n : String(n); };
     ctx.displayTitle = type === "movie"
       ? (ctx.meta.title || ("TMDB " + tmdbId)) + (ctx.meta.year ? " (" + ctx.meta.year + ")" : "")
       : (ctx.meta.title || ("TMDB " + tmdbId)) + " S" + p2(season) + "E" + p2(episode);
     log(type + ' "' + ctx.displayTitle + '"');
-    return fetchJson(API_BASE + "/seed?mediaId=" + encodeURIComponent(tmdbId), ctx.apiHeaders);
-  }).then(function(d) {
-    if (!d || !d.seed) throw new Error("no seed");
-    ctx.seed = String(d.seed);
-    return Promise.all(SERVERS.map(function(s) {
-      return withTimeout(runServer(s, ctx), SERVER_TIMEOUT_MS, s.name).catch(function(e) {
-        log(s.name + " failed: " + (e && e.message));
-        return [];
-      });
-    }));
-  }).then(function(groups) {
+
+    if (!r[1] || !r[1].seed) {
+      if (r[1]) ctx.diag.push("seed: no seed in " + shortJson(r[1], 80));
+      return [];
+    }
+    ctx.seed = String(r[1].seed);
+    return runAll(ctx);
+  }).then(function(list) {
     var seen = {};
     var out = [];
-    groups.forEach(function(g) {
-      g.forEach(function(s) {
-        if (seen[s.url]) return;
-        seen[s.url] = true;
-        delete s._rank;
-        out.push(s);
-      });
+    list.forEach(function(x) {
+      if (seen[x.url]) return;
+      seen[x.url] = true;
+      delete x._rank;
+      out.push(x);
     });
-    log("Returned " + out.length + " stream(s)");
+    log("Returned " + out.length + " stream(s)" + (ctx.diag.length ? " | diag: " + ctx.diag.join(" | ") : ""));
+    if (!out.length && DEBUG_STREAM) return [diagStream(ctx)];
     return out;
   });
 }
@@ -314,7 +420,8 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
 
   return getStreamsFor(tmdbId, type, season, episode).catch(function(err) {
     log("error: " + (err && err.message));
-    return [];
+    if (!DEBUG_STREAM) return [];
+    return [diagStream({ diag: ["fatal: " + (err && err.message)] })];
   });
 }
 
