@@ -85,7 +85,8 @@ function qualityLabel(q) {
   return isNaN(n) ? String(q) : n + "p";
 }
 
-// Stream type: trust the response's own "type" first.
+// Stream type: trust the response's own "type" first. VidLink proxy URLs often
+// end in "-m3u8" or have no extension at all, so only ".mp4" / ".mpd" are special-cased.
 function detectType(declared, url) {
   var d = String(declared || "").toLowerCase();
   if (d.indexOf("dash") !== -1 || d.indexOf("mpd") !== -1) return "dash";
@@ -96,141 +97,9 @@ function detectType(declared, url) {
   return "hls";
 }
 
-// ---------------------------------------------------------------- DASH MPD splitting
-
-function escapeRegex(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function base64Encode(str) {
-  if (typeof btoa === "function") {
-    return btoa(unescape(encodeURIComponent(str)));
-  }
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(str, "utf8").toString("base64");
-  }
-  throw new Error("no base64 encoder available");
-}
-
-// Work out what <BaseURL> to inject. If the original MPD had one, resolve it
-// against the MPD URL to make it absolute. Otherwise use the MPD's own directory.
-function resolveBaseUrl(mpdText, mpdUrl) {
-  var m = mpdText.match(/<BaseURL>([^<]+)<\/BaseURL>/);
-  if (m) {
-    var b = m[1].trim();
-    if (/^https?:\/\//i.test(b)) return b;
-    if (b.charAt(b.length - 1) !== "/") b += "/";
-    return new URL(b, mpdUrl).href;
-  }
-  return mpdUrl.substring(0, mpdUrl.lastIndexOf("/") + 1);
-}
-
-// Strip all <BaseURL> elements anywhere in the MPD so we can put our own back
-// at the top level.
-function stripBaseUrls(mpdText) {
-  return mpdText.replace(/<BaseURL>[^<]*<\/BaseURL>/g, "");
-}
-
-function injectBaseUrl(mpdText, baseUrl) {
-  // Insert right after the opening <MPD ...> tag, so it applies to all Periods.
-  return mpdText.replace(/(<MPD\b[^>]*>)/, "$1\n  <BaseURL>" + baseUrl + "</BaseURL>");
-}
-
-// Return a copy of the MPD that contains only the given video Representation id,
-// plus every non-video AdaptationSet unchanged.
-function buildFilteredMpd(mpdText, keepRepId) {
-  return mpdText.replace(/<AdaptationSet\b[^>]*>[\s\S]*?<\/AdaptationSet>/g, function(asBlock) {
-    var isVideo =
-      /mimeType="video\//.test(asBlock) ||
-      /contentType="video"/.test(asBlock);
-    if (!isVideo) return asBlock;
-
-    var hasClosingForm = /<Representation\b[^>]*>[\s\S]*?<\/Representation>/.test(asBlock);
-    var repPattern = hasClosingForm
-      ? /<Representation\b[^>]*>[\s\S]*?<\/Representation>/g
-      : /<Representation\b[^>]*\/>/g;
-
-    // Remove every video representation.
-    var withoutReps = asBlock.replace(repPattern, "");
-
-    // Put back the one we want.
-    var idPattern = escapeRegex(keepRepId);
-    var keepRe = new RegExp(
-      '<Representation\\b[^>]*\\bid="' + idPattern + '"[^>]*>[\\s\\S]*?<\\/Representation>' +
-      '|<Representation\\b[^>]*\\bid="' + idPattern + '"[^>]*\\/>'
-    );
-    var keepMatch = asBlock.match(keepRe);
-    if (!keepMatch) return asBlock;
-
-    return withoutReps.replace(
-      /<\/AdaptationSet>/,
-      "  " + keepMatch[0] + "\n</AdaptationSet>"
-    );
-  });
-}
-
-// Parse the MPD and return one entry per video representation.
-// Each entry has an absolute BaseURL injected and is returned as a data: URL.
-function splitDashMpd(mpdText, mpdUrl) {
-  var baseUrl = resolveBaseUrl(mpdText, mpdUrl);
-  var cleaned = stripBaseUrls(mpdText);
-  cleaned = injectBaseUrl(cleaned, baseUrl);
-
-  var results = [];
-  var adaptationSets = cleaned.match(/<AdaptationSet\b[^>]*>[\s\S]*?<\/AdaptationSet>/g) || [];
-
-  adaptationSets.forEach(function(asBlock) {
-    var isVideo =
-      /mimeType="video\//.test(asBlock) ||
-      /contentType="video"/.test(asBlock);
-    if (!isVideo) return;
-
-    var reps = asBlock.match(/<Representation\b[^>]*>[\s\S]*?<\/Representation>/g) || [];
-    if (!reps.length) {
-      reps = asBlock.match(/<Representation\b[^>]*\/>/g) || [];
-    }
-
-    reps.forEach(function(repBlock) {
-      var idMatch = repBlock.match(/\bid="([^"]+)"/);
-      if (!idMatch) return;
-      var repId = idMatch[1];
-
-      var hMatch = repBlock.match(/\bheight="([^"]+)"/);
-      var wMatch = repBlock.match(/\bwidth="([^"]+)"/);
-      var bMatch = repBlock.match(/\bbandwidth="([^"]+)"/);
-
-      var height = hMatch ? parseInt(hMatch[1], 10) : 0;
-      var width = wMatch ? parseInt(wMatch[1], 10) : 0;
-      var bw = bMatch ? parseInt(bMatch[1], 10) : 0;
-
-      var label = height ? (height + "p")
-                 : width ? (width + "p")
-                 : "Auto";
-
-      var filtered = buildFilteredMpd(cleaned, repId);
-      var dataUrl = "data:application/dash+xml;base64," + base64Encode(filtered);
-
-      results.push({
-        repId: repId,
-        quality: label,
-        height: height,
-        width: width,
-        bandwidth: bw,
-        url: dataUrl
-      });
-    });
-  });
-
-  // De-dupe identical labels in case of odd MPDs.
-  var seen = {};
-  return results.filter(function(r) {
-    if (seen[r.quality]) return false;
-    seen[r.quality] = true;
-    return true;
-  });
-}
-
 // ---------------------------------------------------------------- stream builder
+// embedPageUrl is used as Referer/Origin so the CDN accepts segment requests.
+// signedHeaders (stream.playlistHeaders, e.g. a CloudFront Cookie) are sent as-is, with only a User-Agent.
 function buildStreams(qualities, displayTitle, embedPageUrl, signedHeaders) {
   var streams = [];
   var browserHeaders = {
@@ -254,8 +123,7 @@ function buildStreams(qualities, displayTitle, embedPageUrl, signedHeaders) {
     var entry = qualities[key];
     if (!entry) return;
     var url = entry.url || entry.playlist || entry.file || entry.src;
-    if (!url) return;
-    if (url.indexOf("http") !== 0 && url.indexOf("data:") !== 0) return;
+    if (!url || url.indexOf("http") !== 0) return;
 
     var kind = detectType(entry.type, url);
     var qLabel = qualityLabel(key);
@@ -279,66 +147,132 @@ function buildStreams(qualities, displayTitle, embedPageUrl, signedHeaders) {
   return streams;
 }
 
-// ---------------------------------------------------------------- DASH path
-function buildDashStreams(mpdUrl, displayTitle, embedPageUrl, signedHeaders) {
-  var fetchHeaders = { "User-Agent": UA };
-  if (signedHeaders && typeof signedHeaders === "object") {
-    Object.keys(signedHeaders).forEach(function(k) {
-      fetchHeaders[k] = signedHeaders[k];
-    });
-  }
+// ---------------------------------------------------------------- manifest expansion (one link per quality)
+function absUrl(base, rel) {
+  if (/^https?:\/\//i.test(rel)) return rel;
+  var clean = base.split("#")[0].split("?")[0];
+  var m = /^(https?:\/\/[^\/]+)(\/.*)?$/i.exec(clean);
+  if (!m) return rel;
+  var origin = m[1];
+  if (rel.charAt(0) === "/") return origin + rel;
+  var parts = (m[2] || "/").split("/");
+  parts.pop();
+  rel.split("/").forEach(function(seg) {
+    if (seg === "..") { if (parts.length > 1) parts.pop(); }
+    else if (seg !== ".") parts.push(seg);
+  });
+  return origin + parts.join("/");
+}
 
-  return fetchText(mpdUrl, fetchHeaders).then(function(mpdText) {
-    var parts = splitDashMpd(mpdText, mpdUrl);
-    log("Parsed MPD: " + parts.length + " video representation(s)");
-
-    var streamHeaders = { "User-Agent": UA };
-    if (signedHeaders && typeof signedHeaders === "object") {
-      Object.keys(signedHeaders).forEach(function(k) {
-        streamHeaders[k] = signedHeaders[k];
-      });
+// HLS master -> [{height, bandwidth, url}] (skipped when audio is a separate rendition)
+function expandHls(masterUrl, text) {
+  if (/#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI=/i.test(text)) return [];
+  var lines = text.split(/\r?\n/);
+  var byHeight = {};
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i].trim();
+    if (l.indexOf("#EXT-X-STREAM-INF") !== 0) continue;
+    var res = /RESOLUTION=(\d+)x(\d+)/i.exec(l);
+    var bw = /BANDWIDTH=(\d+)/i.exec(l);
+    var uri = null;
+    for (var j = i + 1; j < lines.length; j++) {
+      var n = lines[j].trim();
+      if (n && n.charAt(0) !== "#") { uri = n; break; }
     }
+    if (!uri) continue;
+    var h = res ? parseInt(res[2], 10) : 0;
+    var b = bw ? parseInt(bw[1], 10) : 0;
+    var key = h || ("bw" + b);
+    if (!byHeight[key] || b > byHeight[key].bandwidth) {
+      byHeight[key] = { height: h, bandwidth: b, url: absUrl(masterUrl, uri) };
+    }
+  }
+  return Object.keys(byHeight).map(function(k) { return byHeight[k]; });
+}
 
-    var streams = [];
+var REP_RE = /<Representation\b[^>]*?(?:\/>|>[\s\S]*?<\/Representation>)/g;
 
-    // Always include the original MPD first as a fallback "Auto (all qualities)".
-    streams.push({
-      name: PROVIDER_NAME + " Auto",
-      title: displayTitle + " • Auto (all qualities)",
-      url: mpdUrl,
-      quality: "Auto",
-      size: "Unknown",
-      type: "dash",
-      headers: streamHeaders,
-      provider: PROVIDER_ID
+// Make segment paths absolute so the MPD still resolves when served as a data: URL.
+function absolutizeMpd(mpd, mpdUrl) {
+  var had = false;
+  mpd = mpd.replace(/<BaseURL>([^<]*)<\/BaseURL>/g, function(m, u) {
+    had = true;
+    return "<BaseURL>" + absUrl(mpdUrl, u.trim()) + "</BaseURL>";
+  });
+  if (!had) {
+    var dir = absUrl(mpdUrl, "./");
+    mpd = mpd.replace(/(<MPD\b[^>]*>)/, function(m) { return m + "<BaseURL>" + dir + "</BaseURL>"; });
+  }
+  return mpd;
+}
+
+// Drop every video Representation except the requested height.
+function filterMpd(mpd, keep) {
+  return mpd.replace(REP_RE, function(block) {
+    var open = /^<Representation\b[^>]*>/.exec(block);
+    var h = open && /\sheight=["'](\d+)["']/.exec(open[0]);
+    return (h && parseInt(h[1], 10) !== keep) ? "" : block;
+  });
+}
+
+// DASH MPD -> [{height, bandwidth, url}] where url is a single-quality MPD (data: URL)
+function expandDash(mpdUrl, mpd) {
+  var heights = {};
+  var tagRe = /<Representation\b[^>]*>/g;
+  var m;
+  while ((m = tagRe.exec(mpd))) {
+    var h = /\sheight=["'](\d+)["']/.exec(m[0]);
+    if (h) heights[h[1]] = true;
+  }
+  var list = Object.keys(heights).map(Number).sort(function(a, b) { return b - a; });
+  if (list.length < 2) return [];
+  var base = absolutizeMpd(mpd, mpdUrl);
+  return list.map(function(h) {
+    return {
+      height: h,
+      bandwidth: 0,
+      url: "data:application/dash+xml;charset=utf-8," + encodeURIComponent(filterMpd(base, h))
+    };
+  });
+}
+
+// Auto link first (the proven one), then one link per quality found in the manifest.
+function buildPlaylistStreams(stream, displayTitle, embedPageUrl) {
+  var base = buildStreams(
+    { "auto": { url: stream.playlist, type: stream.type } },
+    displayTitle, embedPageUrl, stream.playlistHeaders
+  );
+  if (!base.length) return Promise.resolve(base);
+  var auto = base[0];
+
+  if (auto.type !== "dash" && auto.type !== "hls") return Promise.resolve(base);
+
+  return fetchText(auto.url, auto.headers).then(function(text) {
+    var variants = auto.type === "dash" ? expandDash(auto.url, text) : expandHls(auto.url, text);
+    log("Manifest variants: " + variants.length);
+    if (!variants.length) return [auto];
+
+    variants.sort(function(a, b) {
+      return (b.height - a.height) || (b.bandwidth - a.bandwidth);
     });
 
-    parts.forEach(function(part) {
-      streams.push({
-        name: PROVIDER_NAME + " " + part.quality,
-        title: displayTitle + " • " + part.quality,
-        url: part.url,
-        quality: part.quality,
+    var extra = variants.map(function(v) {
+      var label = v.height ? qualityLabel(v.height) : (Math.round(v.bandwidth / 1000) + "kbps");
+      return {
+        name: PROVIDER_NAME + " " + label,
+        title: displayTitle + " • " + label,
+        url: v.url,
+        quality: label,
         size: "Unknown",
-        type: "dash",
-        headers: streamHeaders,
+        type: auto.type,
+        headers: auto.headers,
         provider: PROVIDER_ID
-      });
+      };
     });
-
-    // Sort so 1080p is at the top and "Auto" (numeric 0) is at the bottom.
-    streams.sort(function(a, b) {
-      return qualityToNumber(b.quality) - qualityToNumber(a.quality);
-    });
-
-    log("Returned " + streams.length + " DASH stream(s)");
-    return streams;
+    return [auto].concat(extra);
   }).catch(function(e) {
-    log("DASH split failed (" + (e && e.message) + ") — falling back to single MPD entry");
-    return buildStreams(
-      { "auto": { url: mpdUrl, type: "dash" } },
-      displayTitle, embedPageUrl, signedHeaders
-    );
+    log("Manifest expand failed: " + (e && e.message));
+    return [auto];
   });
 }
 
@@ -348,6 +282,7 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
   var displayTitle;
   var embedPageUrl;
 
+  // Build the embed page URL — this is what VidLink's own player uses
   if (type === "movie") {
     embedPageUrl = VIDLINK_BASE + "/movie/" + tmdbId;
   } else {
@@ -355,9 +290,7 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
   }
 
   return fetchTmdb(tmdbId, type).then(function(data) {
-    var title = type === "movie"
-      ? (data.title || data.original_title)
-      : (data.name || data.original_name);
+    var title = type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name);
     var year = type === "movie" ? (data.release_date || "") : (data.first_air_date || "");
     if (type === "movie") {
       displayTitle = title + (year ? " (" + year.slice(0, 4) + ")" : "");
@@ -367,9 +300,7 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
     }
     log(type + ' "' + title + '" — Referer will be: ' + embedPageUrl);
   }).catch(function() {
-    displayTitle = type === "movie"
-      ? ("TMDB " + tmdbId)
-      : ("TMDB " + tmdbId + " S" + season + "E" + episode);
+    displayTitle = type === "movie" ? ("TMDB " + tmdbId) : ("TMDB " + tmdbId + " S" + season + "E" + episode);
   }).then(function() {
     return encodeTmdbId(tmdbId);
   }).then(function(encodedId) {
@@ -396,30 +327,21 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
         return [];
       }
       log("deliveryType: " + stream.deliveryType);
-
       var qualities = stream.qualities;
-      if (qualities) {
-        var s = buildStreams(qualities, displayTitle, embedPageUrl, stream.playlistHeaders);
-        log("Returned " + s.length + " stream(s) from qualities");
-        return s;
-      }
-
-      if (stream.playlist) {
-        var kind = detectType(stream.type, stream.playlist);
-        log("Playlist format detected (type: " + stream.type + " -> " + kind + ")");
-
-        if (kind === "dash") {
-          return buildDashStreams(stream.playlist, displayTitle, embedPageUrl, stream.playlistHeaders);
+      if (!qualities) {
+        if (stream.playlist) {
+          log("Playlist format detected (type: " + stream.type + ")");
+          return buildPlaylistStreams(stream, displayTitle, embedPageUrl).then(function(streams) {
+            log("Returned " + streams.length + " stream(s)");
+            return streams;
+          });
         }
-
-        return buildStreams(
-          { "auto": { url: stream.playlist, type: stream.type } },
-          displayTitle, embedPageUrl, stream.playlistHeaders
-        );
+        log("No qualities in stream");
+        return [];
       }
-
-      log("No qualities or playlist in stream");
-      return [];
+      var streams = buildStreams(qualities, displayTitle, embedPageUrl);
+      log("Returned " + streams.length + " stream(s)");
+      return streams;
     });
   });
 }
