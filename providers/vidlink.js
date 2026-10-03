@@ -11,6 +11,10 @@ var PLAYBACK_ENV = "webkit";
 
 var FETCH_TIMEOUT_MS = 12000;
 
+// Cloudflare Worker (worker.js) base URL, no trailing slash.
+// Empty = only the Auto link is returned.
+var MPD_PROXY = "https://test.vanseleem.workers.dev";
+
 function log(m) { console.log("[VidLink] " + m); }
 
 // ---------------------------------------------------------------- http
@@ -190,33 +194,9 @@ function expandHls(masterUrl, text) {
   return Object.keys(byHeight).map(function(k) { return byHeight[k]; });
 }
 
-var REP_RE = /<Representation\b[^>]*?(?:\/>|>[\s\S]*?<\/Representation>)/g;
-
-// Make segment paths absolute so the MPD still resolves when served as a data: URL.
-function absolutizeMpd(mpd, mpdUrl) {
-  var had = false;
-  mpd = mpd.replace(/<BaseURL>([^<]*)<\/BaseURL>/g, function(m, u) {
-    had = true;
-    return "<BaseURL>" + absUrl(mpdUrl, u.trim()) + "</BaseURL>";
-  });
-  if (!had) {
-    var dir = absUrl(mpdUrl, "./");
-    mpd = mpd.replace(/(<MPD\b[^>]*>)/, function(m) { return m + "<BaseURL>" + dir + "</BaseURL>"; });
-  }
-  return mpd;
-}
-
-// Drop every video Representation except the requested height.
-function filterMpd(mpd, keep) {
-  return mpd.replace(REP_RE, function(block) {
-    var open = /^<Representation\b[^>]*>/.exec(block);
-    var h = open && /\sheight=["'](\d+)["']/.exec(open[0]);
-    return (h && parseInt(h[1], 10) !== keep) ? "" : block;
-  });
-}
-
-// DASH MPD -> [{height, bandwidth, url}] where url is a single-quality MPD (data: URL)
+// DASH MPD -> one entry per video height, each served by mpd-proxy as /mpd/<height>/index.mpd
 function expandDash(mpdUrl, mpd) {
+  if (!MPD_PROXY) { log("MPD_PROXY not set, Auto only"); return []; }
   var heights = {};
   var tagRe = /<Representation\b[^>]*>/g;
   var m;
@@ -226,12 +206,11 @@ function expandDash(mpdUrl, mpd) {
   }
   var list = Object.keys(heights).map(Number).sort(function(a, b) { return b - a; });
   if (list.length < 2) return [];
-  var base = absolutizeMpd(mpd, mpdUrl);
   return list.map(function(h) {
     return {
       height: h,
       bandwidth: 0,
-      url: "data:application/dash+xml;charset=utf-8," + encodeURIComponent(filterMpd(base, h))
+      url: MPD_PROXY + "/mpd/" + h + "/index.mpd?u=" + encodeURIComponent(mpdUrl)
     };
   });
 }
