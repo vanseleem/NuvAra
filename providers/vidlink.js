@@ -1,17 +1,3 @@
-/**
- * VidLink.pro provider  (v2 — full-page Referer + browser headers)
- *
- * The API is confirmed working (returns 1080p/480p/360p). The buffering was
- * caused by sending a root Referer instead of the actual embed page URL.
- * VidLink's CDN checks the exact page path for segment requests.
- *
- * Changes vs v1:
- *  - Referer is now https://vidlink.pro/movie/{tmdbId}  (or /tv/{id}/{s}/{e})
- *  - Origin reflects the same URL
- *  - Full Chrome header set added (Sec-Fetch-*, Accept-Language, etc.)
- *  - Stream log now shows the exact returned URL for diagnosis
- */
-
 var PROVIDER_ID = "vidlink";
 var PROVIDER_NAME = "VidLink";
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
@@ -19,6 +5,9 @@ var TMDB_API_KEY = "83d364331c40bfbe29858aeed82f45cc";
 var ENC_API = "https://enc-dec.app/api/enc-vidlink";
 var VIDLINK_API = "https://vidlink.pro/api/b";
 var VIDLINK_BASE = "https://vidlink.pro";
+
+// Sent on the VidLink API call. Without it the API returns bcdn MP4s that answer 429 to non-browser clients.
+var PLAYBACK_ENV = "webkit";
 
 var FETCH_TIMEOUT_MS = 12000;
 
@@ -96,9 +85,22 @@ function qualityLabel(q) {
   return isNaN(n) ? String(q) : n + "p";
 }
 
+// Stream type: trust the response's own "type" first. VidLink proxy URLs often
+// end in "-m3u8" or have no extension at all, so only ".mp4" / ".mpd" are special-cased.
+function detectType(declared, url) {
+  var d = String(declared || "").toLowerCase();
+  if (d.indexOf("dash") !== -1 || d.indexOf("mpd") !== -1) return "dash";
+  if (d.indexOf("hls") !== -1 || d.indexOf("m3u8") !== -1) return "hls";
+  if (d.indexOf("mp4") !== -1) return "mp4";
+  if (/\.mpd(\?|#|$)/i.test(url)) return "dash";
+  if (/\.mp4(\?|#|$)/i.test(url)) return "mp4";
+  return "hls";
+}
+
 // ---------------------------------------------------------------- stream builder
 // embedPageUrl is used as Referer/Origin so the CDN accepts segment requests.
-function buildStreams(qualities, displayTitle, embedPageUrl) {
+// signedHeaders (stream.playlistHeaders, e.g. a CloudFront Cookie) are sent as-is, with only a User-Agent.
+function buildStreams(qualities, displayTitle, embedPageUrl, signedHeaders) {
   var streams = [];
   var browserHeaders = {
     "User-Agent": UA,
@@ -111,15 +113,21 @@ function buildStreams(qualities, displayTitle, embedPageUrl) {
     "Sec-Fetch-Site": "same-origin"
   };
 
+  var streamHeaders = browserHeaders;
+  if (signedHeaders && typeof signedHeaders === "object" && Object.keys(signedHeaders).length) {
+    streamHeaders = { "User-Agent": UA };
+    Object.keys(signedHeaders).forEach(function(k) { streamHeaders[k] = signedHeaders[k]; });
+  }
+
   Object.keys(qualities || {}).forEach(function(key) {
     var entry = qualities[key];
     if (!entry) return;
     var url = entry.url || entry.playlist || entry.file || entry.src;
     if (!url || url.indexOf("http") !== 0) return;
 
-    var isHls = /\.m3u8/i.test(url);
+    var kind = detectType(entry.type, url);
     var qLabel = qualityLabel(key);
-    log("  quality " + qLabel + " -> " + url.slice(0, 100) + "...");
+    log("  quality " + qLabel + " [" + kind + "] -> " + url.slice(0, 100) + "...");
 
     streams.push({
       name: PROVIDER_NAME + " " + qLabel,
@@ -127,8 +135,8 @@ function buildStreams(qualities, displayTitle, embedPageUrl) {
       url: url,
       quality: qLabel,
       size: "Unknown",
-      type: isHls ? "hls" : "mp4",
-      headers: browserHeaders,
+      type: kind,
+      headers: streamHeaders,
       provider: PROVIDER_ID
     });
   });
@@ -181,18 +189,20 @@ function getStreamsFor(tmdbId, mediaType, season, episode) {
       "Referer": embedPageUrl,
       "Origin": VIDLINK_BASE,
       "Accept": "application/json, text/plain, */*",
-      "Accept-Language": "en-US,en;q=0.9"
+      "Accept-Language": "en-US,en;q=0.9",
+      "x-playback-environment": PLAYBACK_ENV
     }).then(function(data) {
       var stream = data && data.stream;
       if (!stream) {
         log("No stream object in response");
         return [];
       }
+      log("deliveryType: " + stream.deliveryType);
       var qualities = stream.qualities;
       if (!qualities) {
         if (stream.playlist) {
-          log("Legacy playlist format detected");
-          return buildStreams({ "auto": { url: stream.playlist } }, displayTitle, embedPageUrl);
+          log("Playlist format detected (type: " + stream.type + ")");
+          return buildStreams({ "auto": { url: stream.playlist, type: stream.type } }, displayTitle, embedPageUrl, stream.playlistHeaders);
         }
         log("No qualities in stream");
         return [];
