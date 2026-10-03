@@ -17,6 +17,20 @@
      "supportsExternalPlayer": true
     },
     {
+      "id": "videasy",
+      "name": "Videasy",
+      "description": "Movies and TV series from VidLink.pro",
+      "version": "1.0.0",
+      "author": "vanseleem",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/videasy.js",
+      "enabled": true,
+      "formats": ["m3u8", "mp4"],
+      "contentLanguage": ["en"],
+     "limited": false,
+     "supportsExternalPlayer": true
+    },
+    {
       "id": "playimdb",
       "name": "PlayIMDb",
       "description": "High-Speed Direct Streaming for Movies",
